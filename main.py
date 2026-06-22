@@ -414,7 +414,7 @@ async def mute(interaction: discord.Interaction, user: discord.Member, time: str
             color=0x2ecc71,  # 鮮綠色邊條
             description=f"Time: {time}\nReason: {reason}"
         )
-        embed.set_footer(text=f"{interaction.guild.name} | 67")
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
         
         # 公開頻道發送通知
         await interaction.response.send_message(embed=embed)
