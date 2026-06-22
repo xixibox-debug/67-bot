@@ -345,6 +345,56 @@ class RemoveTimeView(discord.ui.View):
         super().__init__()
         self.add_item(RemoveTimeSelect(options_list))
 
+
+# --- 🎛️ INTEGRATED COMPONENT: /removepanel SELECTION MENU ---
+class RemovePanelSelect(discord.ui.Select):
+    """用於整合取消各項面板設定的動態下拉選單，方便日後擴充"""
+    def __init__(self):
+        options = [
+            discord.SelectOption(
+                label="歡迎訊息面板 (Welcome Panel)",
+                value="welcome",
+                description="取消綁定歡迎頻道，並刪除客製化卡片模板資料",
+                emoji="👋"
+            ),
+            discord.SelectOption(
+                label="等級提升面板 (Level Up Panel)",
+                value="levelup",
+                description="取消綁定升級頻道，並刪除成員升級通知語句",
+                emoji="🎉"
+            )
+        ]
+        super().__init__(placeholder="請選擇想要取消設定（關閉）的系統面板...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        panel_type = self.values[0]
+        guild_id_str = str(interaction.guild_id)
+        
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        if panel_type == "welcome":
+            cursor.execute("DELETE FROM welcome WHERE guild_id = ?", (guild_id_str,))
+            panel_name = "歡迎訊息面板"
+        elif panel_type == "levelup":
+            cursor.execute("DELETE FROM levelup WHERE guild_id = ?", (guild_id_str,))
+            panel_name = "等級提升面板"
+            
+        count = cursor.rowcount
+        conn.commit()
+        conn.close()
+        
+        if count > 0:
+            await interaction.response.send_message(f"🗑️ 已成功重設並刪除 **{panel_name}** 的所有頻道與模板設定！", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"❌ 移除失敗：此伺服器目前本來就沒有設定 **{panel_name}**。", ephemeral=True)
+
+
+class RemovePanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__()
+        self.add_item(RemovePanelSelect())
+
 # =================================================================
 # 🎛️ 6. SLASH COMMANDS
 # =================================================================
@@ -361,6 +411,7 @@ async def help_cmd(interaction: discord.Interaction):
         value=(
             "`/setwelcome [channel]` - Configure the welcome channel and dynamic color embed layout.\n"
             "`/setlevelup [channel]` - Set the target channel for member level up broadcast alerts.\n"
+            "`/removepanel` - Select panel modules (Welcome, Level Up) via dropdown menu to disable them.\n"
             "`/addtime [time] [message]` - Schedule an automated announcement (Use UTC+0 format, e.g., 08:00).\n"
             "`/removetime` - Display all scheduled announcements to quickly select and delete them.\n"
             "`/automute [word] [minutes]` - Monitor a phrase, automatically deletes message and triggers temporary timeout.\n"
@@ -394,7 +445,17 @@ async def setwelcome(interaction: discord.Interaction, channel: discord.abc.Guil
     await interaction.response.send_modal(WelcomeModal(channel))
 
 
-# --- 🔒 NEW COMMAND: /mute ---
+# --- ⚙️ RENAMED COMMAND: /removepanel ---
+@bot.tree.command(name="removepanel", description="Open dropdown menu to unset and clear server functional panels")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def removepanel(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        content="請從下方的下拉選單中，選擇你想要**取消設定（關閉並清空資料）**的面板功能：", 
+        view=RemovePanelView(), 
+        ephemeral=True
+    )
+
+
 @bot.tree.command(name="mute", description="Timeout a server member with a beautiful green embed report")
 @app_commands.describe(user="The member to mute", time="Duration format (e.g., 1m, 10m, 2h, 1d, 14d)", reason="Reason for mute (Optional)")
 @app_commands.checks.has_permissions(moderate_members=True)
@@ -405,18 +466,15 @@ async def mute(interaction: discord.Interaction, user: discord.Member, time: str
         return
         
     try:
-        # 執行 Discord 官方的禁言 Timeout
         await user.timeout(delta, reason=reason)
         
-        # 依照 1000008236.png 規格組裝 Embed
         embed = discord.Embed(
             title=f"✅ {user.name} has been muted.", 
-            color=0x2ecc71,  # 鮮綠色邊條
+            color=0x2ecc71,  
             description=f"Time: {time}\nReason: {reason}"
         )
-        embed.set_footer(text=f"{interaction.guild.name}｜67")
+        embed.set_footer(text=f"{interaction.guild.name} | 67")
         
-        # 公開頻道發送通知
         await interaction.response.send_message(embed=embed)
     except discord.Forbidden:
         await interaction.response.send_message("❌ 權限不足！機器人的權限必須比該被禁言的成員職位更高。", ephemeral=True)
@@ -424,16 +482,13 @@ async def mute(interaction: discord.Interaction, user: discord.Member, time: str
         await interaction.response.send_message(f"❌ 發生未知錯誤: {e}", ephemeral=True)
 
 
-# --- 🔓 NEW COMMAND: /unmute ---
 @bot.tree.command(name="unmute", description="Instantly remove timeout restriction from a member")
 @app_commands.describe(user="The member to unmute")
 @app_commands.checks.has_permissions(moderate_members=True)
 async def unmute(interaction: discord.Interaction, user: discord.Member):
     try:
-        # 將 Timeout 設為 None 來解除禁言
         await user.timeout(None, reason="Unmuted by Administrator")
         
-        # 依照 1000008236.png 規格組裝解除禁言 Embed
         embed = discord.Embed(
             title=f"✅ {user.name} has been unmuted.",
             color=0x2ecc71
@@ -566,7 +621,6 @@ async def setlevelup(interaction: discord.Interaction, channel: discord.abc.Guil
 
 @bot.event
 async def on_member_join(member: discord.Member):
-    """新成員加入事件：動態追蹤邀請人、頭像智慧吸色、精準對齊變數結構"""
     guild = member.guild
     inviter_name = "Unknown"
     
