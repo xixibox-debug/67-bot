@@ -7,12 +7,12 @@ import os
 import sqlite3
 import io
 import logging
+import re
 from PIL import Image
 
 # =================================================================
-# ⚙️ 1. 機器人全域固定設定項目
+# ⚙️ 1. GLOBAL BOT CONFIGURATIONS
 # =================================================================
-# 狀態列完全鎖定，每 5 秒切換一次（已全數鎖定為英文）
 WATCHING_STATUSES = [
     "67",
     "/help",    
@@ -20,15 +20,13 @@ WATCHING_STATUSES = [
     "24/7 Auto Mute"
 ]
 
-# 設定 SQLite 資料庫路徑（支援 Railway 的 data 持久化目錄）
 os.makedirs("data", exist_ok=True)
 DB_PATH = "data/bot.db"
 
-# 設定基本的 Log 輸出，方便在雲端後台查看錯誤
 logging.basicConfig(level=logging.INFO)
 
 # =================================================================
-# 🗄️ 2. 資料庫結構初始化 (SQLite3)
+# 🗄️ 2. DATABASE INITIALIZATION (SQLite3)
 # =================================================================
 def init_db():
     """初始化所有機器人所需要的資料庫表格，確保欄位完整不遺漏"""
@@ -86,19 +84,17 @@ def init_db():
     conn.close()
     print("✨ [Database] All functional database tables checked and initialized.")
 
-# 執行資料庫建置
 init_db()
 
 # =================================================================
-# 🤖 3. 機器人主核心類別建構
+# 🤖 3. BOT CORE CLASS DEFINITION
 # =================================================================
 class SixSevenBot(commands.Bot):
     def __init__(self):
-        # 啟用全功能 Intents，確保看得到成員加入、訊息內容與邀請碼
         intents = discord.Intents.all()
         super().__init__(command_prefix="!", intents=intents)
         self.status_index = 0
-        self.invites = {} # 用於儲存各伺服器邀請碼狀態的記憶體快取
+        self.invites = {}
 
     async def setup_hook(self):
         """當機器人啟動時，負責掛載背景任務與同步斜線指令"""
@@ -107,7 +103,7 @@ class SixSevenBot(commands.Bot):
         await self.tree.sync()
         print("🤖 [System] Bot core and slash command tree synchronized successfully.")
 
-    # --- 🔄 背景任務一：固定狀態每 5 秒自動輪播 ---
+    # --- 🔄 LOOP 1: STATUS ROTATION (EVERY 5 SECONDS) ---
     @tasks.loop(seconds=5)
     async def rotate_status(self):
         if not WATCHING_STATUSES:
@@ -130,10 +126,9 @@ class SixSevenBot(commands.Bot):
     async def before_rotate(self):
         await self.wait_until_ready()
 
-    # --- ⏰ 背景任務二：24/7 報時系統巡邏 (每分鐘檢查一次) ---
+    # --- ⏰ LOOP 2: 24/7 ANNOUNCEMENT CHECKER (EVERY 60 SECONDS) ---
     @tasks.loop(seconds=60)
     async def check_time_announcements(self):
-        # 取得目前的 UTC 零時區時間，格式為 HH:MM
         now_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M")
         
         conn = sqlite3.connect(DB_PATH)
@@ -146,7 +141,6 @@ class SixSevenBot(commands.Bot):
             channel = self.get_channel(int(channel_id))
             if channel:
                 try:
-                    # 報時直接發送純文字內容
                     await channel.send(message)
                 except Exception as e:
                     print(f"❌ Announcement delivery failed (Channel ID: {channel_id}): {e}")
@@ -155,16 +149,14 @@ class SixSevenBot(commands.Bot):
     async def before_check_time(self):
         await self.wait_until_ready()
 
-# 實例化機器人對象
 bot = SixSevenBot()
 
 # =================================================================
-# 📡 4. 邀請碼快取追蹤事件處理
+# 📡 4. INVITE CACHE EVENTS
 # =================================================================
 @bot.event
 async def on_ready():
     print(f"🟢 [Online] Bot successfully logged in as {bot.user.name} ({bot.user.id})")
-    # 開機時抓取所有伺服器的現有邀請碼列表並存入快取
     for guild in bot.guilds:
         try:
             bot.invites[guild.id] = await guild.invites()
@@ -176,7 +168,6 @@ async def on_ready():
 
 @bot.event
 async def on_guild_join(guild):
-    """當機器人被加入新伺服器，自動補抓邀請碼快取"""
     try:
         bot.invites[guild.id] = await guild.invites()
     except:
@@ -184,15 +175,39 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_guild_remove(guild):
-    """當機器人離開伺服器，清除對應快取避免洩漏記憶體"""
     bot.invites.pop(guild.id, None)
 
 # =================================================================
-# 🖥️ 5. 用於指令的 UI 互動視窗 (Modals) 與下拉選單 (Views)
+# 🛠️ 4.5 TIME PARSER HELPER FOR MUTE COMMAND
+# =================================================================
+def parse_mute_duration(duration_str: str):
+    """解析時間字串，如 1m, 3m, 1h, 1d 等，最高限制 14d"""
+    match = re.match(r"^(\d+)([mhd])$", duration_str.strip().lower())
+    if not match:
+        return None, "❌ 時間格式錯誤！請使用基本格式如 `1m` (分), `3h` (小時), `1d` (天)。"
+    
+    amount = int(match.group(1))
+    unit = match.group(2)
+    
+    if unit == 'm':
+        delta = datetime.timedelta(minutes=amount)
+    elif unit == 'h':
+        delta = datetime.timedelta(hours=amount)
+    elif unit == 'd':
+        delta = datetime.timedelta(days=amount)
+    else:
+        return None, "❌ 未知的時間單位。"
+        
+    if delta > datetime.timedelta(days=14):
+        return None, "❌ 時間限制超標！最多只能禁言至 `14d` (14天)。"
+        
+    return delta, None
+
+# =================================================================
+# 🖥️ 5. INTERACTIVE UI COMPONENTS (MODALS & VIEWS)
 # =================================================================
 
 class ManualMsgModal(discord.ui.Modal, title="Send Plain Text Message"):
-    """/manualmsg 專用彈出式視窗：完全不用嵌入、無前綴、純文字代理發言"""
     msg_input = discord.ui.TextInput(
         label="Enter the message content to broadcast", 
         style=discord.TextStyle.paragraph,
@@ -201,14 +216,12 @@ class ManualMsgModal(discord.ui.Modal, title="Send Plain Text Message"):
     )
     
     async def on_submit(self, interaction: discord.Interaction):
-        # 核心修改：直接在當前頻道發送純文字訊息，完全不透過 Embed 包裹
         await interaction.channel.send(content=self.msg_input.value)
-        # 悄悄話回覆管理員確認訊息已發送
-        await interaction.response.send_message("✅ Successfully sent the message.", ephemeral=True)
+        await interaction.response.send_message("✅ Message successfully sent as plain text.", ephemeral=True)
 
 
 class WelcomeModal(discord.ui.Modal, title="Setup Server Welcome Message"):
-    """/setwelcome 專用彈出式視窗"""
+    """/setwelcome 專用彈出式視窗：儲存後直接在悄悄話下方塞入完全模擬的測試卡片"""
     def __init__(self, channel: discord.abc.GuildChannel):
         super().__init__()
         self.channel = channel
@@ -229,14 +242,56 @@ class WelcomeModal(discord.ui.Modal, title="Setup Server Welcome Message"):
         )
         conn.commit()
         conn.close()
+
+        guild = interaction.guild
+        member = interaction.user  
+        mock_inviter = "67_Tester" 
+
+        avatar_color = discord.Color.blue()
+        try:
+            avatar_bytes = await member.display_avatar.read()
+            img = Image.open(io.BytesIO(avatar_bytes)).resize((1, 1))
+            rgb = img.getpixel((0, 0))
+            if isinstance(rgb, tuple):
+                avatar_color = discord.Color.from_rgb(rgb[0], rgb[1], rgb[2])
+            else:
+                avatar_color = discord.Color.from_rgb(rgb, rgb, rgb)
+        except:
+            pass
+
+        def parse_template(template_str):
+            if not template_str:
+                return ""
+            return (template_str
+                    .replace("{member.count}", str(guild.member_count))
+                    .replace("{inviter.name}", mock_inviter)
+                    .replace("{user.name}", member.name)
+                    .replace("{user.mention}", member.mention)
+                    .replace("{server.name}", guild.name))
+
+        description_text = parse_template(self.msg_input.value)
+        title_text = parse_template("Hey, welcome to {server.name}!!!")
+        footer_text = parse_template("{server.name} | 67")
+
+        embed = discord.Embed(title=title_text, description=description_text, color=avatar_color)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.set_footer(text=footer_text)
+
+        confirmation_content = (
+            f"✅ **Welcome settings configured successfully!** Messages bound to {self.channel.mention}.\n"
+            f"--- \n"
+            f"👁️ **【歡迎卡片效果即時測試預覽】** (此為悄悄話，僅有你能看見測試畫面)：\n"
+            f"{member.mention}"
+        )
+
         await interaction.response.send_message(
-            f"✅ Welcome settings configured successfully! Messages will be sent to {self.channel.mention} with dynamic avatar color theme enabled.", 
+            content=confirmation_content,
+            embed=embed,
             ephemeral=True
         )
 
 
 class LevelUpModal(discord.ui.Modal, title="Customize Level Up Message"):
-    """/setlevelup 專用彈出式視窗"""
     def __init__(self, channel: discord.abc.GuildChannel):
         super().__init__()
         self.channel = channel
@@ -264,12 +319,10 @@ class LevelUpModal(discord.ui.Modal, title="Customize Level Up Message"):
 
 
 class RemoveTimeSelect(discord.ui.Select):
-    """/removetime 專用的動態下拉選單組件"""
     def __init__(self, options_list):
         options = []
         for item in options_list:
             db_id, t_time, msg = item
-            # 取前20個字當作預覽
             short_msg = msg if len(msg) <= 20 else f"{msg[:17]}..."
             options.append(discord.SelectOption(
                 label=f"[{t_time}] {short_msg}", 
@@ -293,7 +346,7 @@ class RemoveTimeView(discord.ui.View):
         self.add_item(RemoveTimeSelect(options_list))
 
 # =================================================================
-# 🎛️ 6. 全套系統斜線指令實作 (Slash Commands)
+# 🎛️ 6. SLASH COMMANDS
 # =================================================================
 
 @bot.tree.command(name="help", description="Display the full list of bot commands and documentation")
@@ -311,7 +364,9 @@ async def help_cmd(interaction: discord.Interaction):
             "`/addtime [time] [message]` - Schedule an automated announcement (Use UTC+0 format, e.g., 08:00).\n"
             "`/removetime` - Display all scheduled announcements to quickly select and delete them.\n"
             "`/automute [word] [minutes]` - Monitor a phrase, automatically deletes message and triggers temporary timeout.\n"
-            "`/removeautomute [word]` - Unblock a specified phrase from the automated anti-spam defense list."
+            "`/removeautomute [word]` - Unblock a specified phrase from the automated anti-spam defense list.\n"
+            "`/mute [user] [time] [reason]` - Timeout a user and log with custom design card.\n"
+            "`/unmute [user]` - Instantly unmute a user and remove timeout restriction."
         ), 
         inline=False
     )
@@ -330,7 +385,6 @@ async def help_cmd(interaction: discord.Interaction):
 
 @bot.tree.command(name="manualmsg", description="Send a plain text message as the bot (no embeds or prefixes)")
 async def manualmsg(interaction: discord.Interaction):
-    # 彈出 Modal 供使用者輸入
     await interaction.response.send_modal(ManualMsgModal())
 
 
@@ -338,6 +392,59 @@ async def manualmsg(interaction: discord.Interaction):
 @app_commands.describe(channel="Choose the channel where welcome embed cards will be sent")
 async def setwelcome(interaction: discord.Interaction, channel: discord.abc.GuildChannel):
     await interaction.response.send_modal(WelcomeModal(channel))
+
+
+# --- 🔒 NEW COMMAND: /mute ---
+@bot.tree.command(name="mute", description="Timeout a server member with a beautiful green embed report")
+@app_commands.describe(user="The member to mute", time="Duration format (e.g., 1m, 10m, 2h, 1d, 14d)", reason="Reason for mute (Optional)")
+@app_commands.checks.has_permissions(moderate_members=True)
+async def mute(interaction: discord.Interaction, user: discord.Member, time: str, reason: str = "None"):
+    delta, error_msg = parse_mute_duration(time)
+    if error_msg:
+        await interaction.response.send_message(content=error_msg, ephemeral=True)
+        return
+        
+    try:
+        # 執行 Discord 官方的禁言 Timeout
+        await user.timeout(delta, reason=reason)
+        
+        # 依照 1000008236.png 規格組裝 Embed
+        embed = discord.Embed(
+            title=f"✅ {user.name} has been muted.", 
+            color=0x2ecc71,  # 鮮綠色邊條
+            description=f"Time: {time}\nReason: {reason}"
+        )
+        embed.set_footer(text=f"{interaction.guild.name} | 67")
+        
+        # 公開頻道發送通知
+        await interaction.response.send_message(embed=embed)
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ 權限不足！機器人的權限必須比該被禁言的成員職位更高。", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ 發生未知錯誤: {e}", ephemeral=True)
+
+
+# --- 🔓 NEW COMMAND: /unmute ---
+@bot.tree.command(name="unmute", description="Instantly remove timeout restriction from a member")
+@app_commands.describe(user="The member to unmute")
+@app_commands.checks.has_permissions(moderate_members=True)
+async def unmute(interaction: discord.Interaction, user: discord.Member):
+    try:
+        # 將 Timeout 設為 None 來解除禁言
+        await user.timeout(None, reason="Unmuted by Administrator")
+        
+        # 依照 1000008236.png 規格組裝解除禁言 Embed
+        embed = discord.Embed(
+            title=f"✅ {user.name} has been unmuted.",
+            color=0x2ecc71
+        )
+        embed.set_footer(text=f"{interaction.guild.name} | 67")
+        
+        await interaction.response.send_message(embed=embed)
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ 權限不足！無法解除該成員的禁言狀態。", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ 發生未知錯誤: {e}", ephemeral=True)
 
 
 @bot.tree.command(name="addtime", description="Add an automated announcement (UTC+0 timezone format)")
@@ -403,7 +510,6 @@ async def level(interaction: discord.Interaction, user: discord.Member = None):
     embed.add_field(name="✨ Current Level", value=f"`Lv. {lvl}`", inline=True)
     embed.add_field(name="✍️ Total Words Chatted", value=f"`{chars}` words", inline=True)
     
-    # 計算下一級所需的目標字數 (每 150 字升一級)
     next_level_chars = lvl * 150
     progress = chars % 150
     embed.add_field(name="📈 Level Up Progress", value=f"`{next_level_chars - chars}` words remaining until next level ({progress}/150)", inline=False)
@@ -455,20 +561,19 @@ async def setlevelup(interaction: discord.Interaction, channel: discord.abc.Guil
     await interaction.response.send_modal(LevelUpModal(channel))
 
 # =================================================================
-# ⚡ 7. 核心系統事件監聽處理 (Events)
+# ⚡ 7. CORE SYSTEM EVENT LISTENERS
 # =================================================================
 
 @bot.event
 async def on_member_join(member: discord.Member):
-    """新成員加入事件：動態追蹤邀請人、頭像智慧吸色、極致還原 UI 截圖排版"""
+    """新成員加入事件：動態追蹤邀請人、頭像智慧吸色、精準對齊變數結構"""
     guild = member.guild
     inviter_name = "Unknown"
     
-    # 1. 🔍 比對快取計算出是誰邀請的
     try:
         old_invites = bot.invites.get(guild.id, [])
         new_invites = await guild.invites()
-        bot.invites[guild.id] = new_invites # 即時同步新列表快取
+        bot.invites[guild.id] = new_invites
         
         for old_inv in old_invites:
             for new_inv in new_invites:
@@ -478,7 +583,6 @@ async def on_member_join(member: discord.Member):
     except Exception as invite_err:
         print(f"⚠️ [Event] Invite tracking calculation error: {invite_err}")
 
-    # 2. 🗄️ 從資料庫提取歡迎訊息設定
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT channel_id, message FROM welcome WHERE guild_id = ?", (str(guild.id),))
@@ -488,8 +592,7 @@ async def on_member_join(member: discord.Member):
     if row:
         channel = bot.get_channel(int(row[0]))
         if channel:
-            # 3. 🎨 核心吸色技術：下載成員頭像並壓縮至 1x1 提取主色
-            avatar_color = discord.Color.blue() # 防錯預設藍色
+            avatar_color = discord.Color.blue()
             try:
                 avatar_bytes = await member.display_avatar.read()
                 img = Image.open(io.BytesIO(avatar_bytes)).resize((1, 1))
@@ -499,4 +602,95 @@ async def on_member_join(member: discord.Member):
                 else:
                     avatar_color = discord.Color.from_rgb(rgb, rgb, rgb)
             except Exception as color_err:
-                print(f"⚠️ [Event] Mem
+                print(f"⚠️ [Event] Color extraction failed: {color_err}")
+
+            def parse_template(template_str):
+                if not template_str:
+                    return ""
+                return (template_str
+                        .replace("{member.count}", str(guild.member_count))
+                        .replace("{inviter.name}", inviter_name)
+                        .replace("{user.name}", member.name)
+                        .replace("{user.mention}", member.mention)
+                        .replace("{server.name}", guild.name))
+
+            description_text = parse_template(row[1])
+            title_text = parse_template("Hey, welcome to {server.name}!!!")
+            footer_text = parse_template("{server.name} | 67")
+
+            embed = discord.Embed(title=title_text, description=description_text, color=avatar_color)
+            embed.set_thumbnail(url=member.display_avatar.url)
+            embed.set_footer(text=footer_text)
+
+            await channel.send(content=f"{member.mention}", embed=embed)
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot or not message.guild:
+        return
+
+    guild_id_str = str(message.guild.id)
+    
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT banned_word, duration_mins FROM mutes WHERE guild_id = ?", (guild_id_str,))
+    banned_words = cursor.fetchall()
+    
+    for word, mins in banned_words:
+        if word in message.content:
+            try:
+                await message.author.timeout(datetime.timedelta(minutes=mins), reason="Triggered server filtered banned word")
+                await message.delete()
+                await message.channel.send(f"🚫 {message.author.mention} triggered a sensitive banned word! Their message was deleted and they have been timed out for `{mins}` minutes.")
+                conn.close()
+                return
+            except discord.Forbidden:
+                print(f"⚠️ [Security] Failed to timeout member due to lack of sufficient bot permissions.")
+            except Exception as e:
+                print(f"⚠️ [Security] Banned word interception routine error: {e}")
+
+    user_id_str = str(message.author.id)
+    cursor.execute("SELECT chars, level FROM levels WHERE user_id = ?", (user_id_str,))
+    row = cursor.fetchone()
+    
+    current_chars, current_level = row if row else (0, 1)
+    level_up_triggered = False
+    
+    if message.content.strip() == "67":
+        current_level += 1
+        level_up_triggered = True
+    else:
+        current_chars += len(message.content)
+        calculated_level = (current_chars // 150) + 1
+        if calculated_level > current_level:
+            current_level = calculated_level
+            level_up_triggered = True
+
+    cursor.execute(
+        "INSERT OR REPLACE INTO levels (user_id, chars, level) VALUES (?, ?, ?)",
+        (user_id_str, current_chars, current_level)
+    )
+    conn.commit()
+
+    if level_up_triggered:
+        cursor.execute("SELECT channel_id, message FROM levelup WHERE guild_id = ?", (guild_id_str,))
+        levelup_row = cursor.fetchone()
+        if levelup_row:
+            notify_channel = bot.get_channel(int(levelup_row[0]))
+            if notify_channel:
+                rendered_msg = levelup_row[1].replace("{user.mention}", message.author.mention)\
+                                             .replace("{user.name}", message.author.name)\
+                                             .replace("{user.level}", str(current_level))
+                try:
+                    await notify_channel.send(content=rendered_msg)
+                except Exception as send_err:
+                    print(f"⚠️ [Event] Level up broadcast message sending failed: {send_err}")
+
+    conn.close()
+    await bot.process_commands(message)
+
+# =================================================================
+# 🚀 8. RUN THE BOT
+# =================================================================
+bot.run(os.getenv("DISCORD_TOKEN"))
