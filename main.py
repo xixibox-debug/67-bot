@@ -70,12 +70,12 @@ def init_db():
         )
     """)
     
-    # 自動 Mute 禁字防護表
+    # 自動 Mute 禁字防護表（欄位格式保持 TEXT 相容性）
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS mutes (
             guild_id TEXT, 
             banned_word TEXT, 
-            duration_mins INTEGER, 
+            duration_str TEXT, 
             PRIMARY KEY (guild_id, banned_word)
         )
     """)
@@ -95,6 +95,7 @@ class SixSevenBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
         self.status_index = 0
         self.invites = {}
+        self.last_announced_minute = ""  # 用於精準防漂移報時鎖
 
     async def setup_hook(self):
         """當機器人啟動時，負責掛載背景任務與同步斜線指令"""
@@ -126,24 +127,32 @@ class SixSevenBot(commands.Bot):
     async def before_rotate(self):
         await self.wait_until_ready()
 
-    # --- ⏰ LOOP 2: 24/7 ANNOUNCEMENT CHECKER (EVERY 60 SECONDS) ---
-    @tasks.loop(seconds=60)
+    # --- ⏰ LOOP 2: 精準防漏報時監聽器 (每 30 秒高頻精準對時) ---
+    @tasks.loop(seconds=30)
     async def check_time_announcements(self):
-        now_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M")
+        # 使用台灣時間時區 (UTC+8)
+        tz_tw = datetime.timezone(datetime.timedelta(hours=8))
+        now_tw = datetime.datetime.now(tz_tw).strftime("%H:%M")
         
+        # 如果這一分鐘已經成功報時過，直接跳過防重複觸發
+        if now_tw == self.last_announced_minute:
+            return
+            
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("SELECT channel_id, message FROM announcements WHERE time = ?", (now_utc,))
+        cursor.execute("SELECT channel_id, message FROM announcements WHERE time = ?", (now_tw,))
         rows = cursor.fetchall()
         conn.close()
         
-        for channel_id, message in rows:
-            channel = self.get_channel(int(channel_id))
-            if channel:
-                try:
-                    await channel.send(message)
-                except Exception as e:
-                    print(f"❌ Announcement delivery failed (Channel ID: {channel_id}): {e}")
+        if rows:
+            self.last_announced_minute = now_tw  # 記錄當前已發送的分鐘
+            for channel_id, message in rows:
+                channel = self.get_channel(int(channel_id))
+                if channel:
+                    try:
+                        await channel.send(message)
+                    except Exception as e:
+                        print(f"❌ Announcement delivery failed (Channel ID: {channel_id}): {e}")
 
     @check_time_announcements.before_loop
     async def before_check_time(self):
@@ -220,10 +229,10 @@ class ManualMsgModal(discord.ui.Modal, title="Send Plain Text Message"):
         await interaction.response.send_message("✅ Message successfully sent as plain text.", ephemeral=True)
 
 
-class WelcomeModal(discord.ui.Modal, title="Setup Server Welcome Message"):
+class WelcomeModal(discord.ui.Modal):
     """/setwelcome 專用彈出式視窗：儲存後直接在悄悄話下方塞入完全模擬的測試卡片"""
-    def __init__(self, channel: discord.abc.GuildChannel):
-        super().__init__()
+    def __init__(self, channel: discord.TextChannel):
+        super().__init__(title="Setup Server Welcome Message")
         self.channel = channel
         
     msg_input = discord.ui.TextInput(
@@ -291,9 +300,9 @@ class WelcomeModal(discord.ui.Modal, title="Setup Server Welcome Message"):
         )
 
 
-class LevelUpModal(discord.ui.Modal, title="Customize Level Up Message"):
-    def __init__(self, channel: discord.abc.GuildChannel):
-        super().__init__()
+class LevelUpModal(discord.ui.Modal):
+    def __init__(self, channel: discord.TextChannel):
+        super().__init__(title="Customize Level Up Message")
         self.channel = channel
         
     msg_input = discord.ui.TextInput(
@@ -346,9 +355,7 @@ class RemoveTimeView(discord.ui.View):
         self.add_item(RemoveTimeSelect(options_list))
 
 
-# --- 🎛️ INTEGRATED COMPONENT: /removepanel SELECTION MENU ---
 class RemovePanelSelect(discord.ui.Select):
-    """用於整合取消各項面板設定的動態下拉選單，方便日後擴充"""
     def __init__(self):
         options = [
             discord.SelectOption(
@@ -412,12 +419,13 @@ async def help_cmd(interaction: discord.Interaction):
             "`/setwelcome [channel]` - Configure the welcome channel and dynamic color embed layout.\n"
             "`/setlevelup [channel]` - Set the target channel for member level up broadcast alerts.\n"
             "`/removepanel` - Select panel modules (Welcome, Level Up) via dropdown menu to disable them.\n"
-            "`/addtime [time] [message]` - Schedule an automated announcement (Use UTC+0 format, e.g., 08:00).\n"
+            "`/addtime [time] [message]` - Schedule an automated announcement (Taiwan Time UTC+8, e.g., 16:30).\n"
             "`/removetime` - Display all scheduled announcements to quickly select and delete them.\n"
-            "`/automute [word] [minutes]` - Monitor a phrase, automatically deletes message and triggers temporary timeout.\n"
+            "`/automute [word] [duration]` - Monitor a phrase, timeouts user with custom embed card without deleting message.\n"
             "`/removeautomute [word]` - Unblock a specified phrase from the automated anti-spam defense list.\n"
             "`/mute [user] [time] [reason]` - Timeout a user and log with custom design card.\n"
-            "`/unmute [user]` - Instantly unmute a user and remove timeout restriction."
+            "`/unmute [user]` - Instantly unmute a user and remove timeout restriction.\n"
+            "`/kick [user] [reason]` - Kick a user from the server and log with custom design card."
         ), 
         inline=False
     )
@@ -441,11 +449,10 @@ async def manualmsg(interaction: discord.Interaction):
 
 @bot.tree.command(name="setwelcome", description="Configure the welcome message channel and template")
 @app_commands.describe(channel="Choose the channel where welcome embed cards will be sent")
-async def setwelcome(interaction: discord.Interaction, channel: discord.abc.GuildChannel):
+async def setwelcome(interaction: discord.Interaction, channel: discord.TextChannel):
     await interaction.response.send_modal(WelcomeModal(channel))
 
 
-# --- ⚙️ RENAMED COMMAND: /removepanel ---
 @bot.tree.command(name="removepanel", description="Open dropdown menu to unset and clear server functional panels")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def removepanel(interaction: discord.Interaction):
@@ -502,11 +509,35 @@ async def unmute(interaction: discord.Interaction, user: discord.Member):
         await interaction.response.send_message(f"❌ 發生未知錯誤: {e}", ephemeral=True)
 
 
-@bot.tree.command(name="addtime", description="Add an automated announcement (UTC+0 timezone format)")
-@app_commands.describe(time="Enter a 24-hour format time like 12:30", message="The full content of the announcement")
+# --- 🛡️ NEW: /kick 踢出成員指令 (外觀比照 /mute 綠色面板) ---
+@bot.tree.command(name="kick", description="Kick a server member with a beautiful green embed report")
+@app_commands.describe(user="The member to kick", reason="Reason for kick (Optional)")
+@app_commands.checks.has_permissions(kick_members=True)
+async def kick(interaction: discord.Interaction, user: discord.Member, reason: str = "None"):
+    try:
+        # 執行踢出
+        await user.kick(reason=reason)
+        
+        # 建立與 /mute 風格一致的嵌入面板
+        embed = discord.Embed(
+            title=f"✅ {user.name} has been kicked.", 
+            color=0x2ecc71,  
+            description=f"Reason: {reason}"
+        )
+        embed.set_footer(text=f"{interaction.guild.name} | 67")
+        
+        await interaction.response.send_message(embed=embed)
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ 權限不足！機器人的最高身分組職位必須比該被踢出成員更高，且需要踢出成員權限。", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ 發生未知錯誤: {e}", ephemeral=True)
+
+
+@bot.tree.command(name="addtime", description="新增自動報時排程（精準支援台灣時間 UTC+8）")
+@app_commands.describe(time="請輸入24小時制時間，例如 08:00 或 16:30", message="報時的訊息內容")
 async def addtime(interaction: discord.Interaction, time: str, message: str):
     if ":" not in time or len(time) != 5:
-        await interaction.response.send_message("❌ Time format error! Please input a 5-character time like `08:00` or `23:15`.", ephemeral=True)
+        await interaction.response.send_message("❌ 時間格式錯誤！請輸入5字元格式，例如 `08:00` 或 `23:15`。", ephemeral=True)
         return
         
     conn = sqlite3.connect(DB_PATH)
@@ -517,7 +548,7 @@ async def addtime(interaction: discord.Interaction, time: str, message: str):
     )
     conn.commit()
     conn.close()
-    await interaction.response.send_message(f"✅ Automated announcement scheduled successfully! The bot will automatically speak at `{time}` UTC daily in this channel.", ephemeral=True)
+    await interaction.response.send_message(f"✅ 自動報時排程設定成功！機器人將於每日台灣時間 `{time}` 在此頻道發送報時訊息。", ephemeral=True)
 
 
 @bot.tree.command(name="removetime", description="List all active automated announcement schedules with a removal menu")
@@ -572,26 +603,27 @@ async def level(interaction: discord.Interaction, user: discord.Member = None):
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="automute", description="Setup banned word filters (timeouts user and deletes message; cannot be 67)")
-@app_commands.describe(message="The sensitive phrase to block", time="Timeout duration in minutes for violators")
-async def automute(interaction: discord.Interaction, message: str, time: int):
+@bot.tree.command(name="automute", description="設定敏感詞防護（不刪除訊息，違規者自動禁言並觸發特製字卡）")
+@app_commands.describe(message="要封鎖的敏感詞彙", time="禁言時間格式（例如：1m, 30m, 2h, 1d）")
+async def automute(interaction: discord.Interaction, message: str, time: str):
     if message == "67":
-        await interaction.response.send_message("❌ Security Exception: The magical core number '67' cannot be set as a banned word!", ephemeral=True)
+        await interaction.response.send_message("❌ 安全例外：無法將核心魔術數字 '67' 設定為敏感詞！", ephemeral=True)
         return
         
-    if time <= 0:
-        await interaction.response.send_message("❌ Duration error! Must be greater than 0 minutes.", ephemeral=True)
+    delta, error_msg = parse_mute_duration(time)
+    if error_msg:
+        await interaction.response.send_message(content=error_msg, ephemeral=True)
         return
         
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT OR REPLACE INTO mutes (guild_id, banned_word, duration_mins) VALUES (?, ?, ?)",
+        "INSERT OR REPLACE INTO mutes (guild_id, banned_word, duration_str) VALUES (?, ?, ?)",
         (str(interaction.guild_id), message, time)
     )
     conn.commit()
     conn.close()
-    await interaction.response.send_message(f"🔒 Banned word defense online! Word `{message}` is now monitored. Violators will be timed out for `{time}` minutes and their messages cleared.", ephemeral=True)
+    await interaction.response.send_message(f"🔒 敏感詞防護上線！已監控字詞 `{message}`。違規者將被禁言 `{time}`，原訊息將被保留並發送 HAHAHA 嘲諷卡片。", ephemeral=True)
 
 
 @bot.tree.command(name="removeautomute", description="Remove a specified banned word from the monitoring filter")
@@ -612,7 +644,7 @@ async def removeautomute(interaction: discord.Interaction, message: str):
 
 @bot.tree.command(name="setlevelup", description="Customize the level up notification message and broadcast channel")
 @app_commands.describe(channel="Choose the specific channel for level up broadcasts")
-async def setlevelup(interaction: discord.Interaction, channel: discord.abc.GuildChannel):
+async def setlevelup(interaction: discord.Interaction, channel: discord.TextChannel):
     await interaction.response.send_modal(LevelUpModal(channel))
 
 # =================================================================
@@ -688,22 +720,39 @@ async def on_message(message: discord.Message):
     
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT banned_word, duration_mins FROM mutes WHERE guild_id = ?", (guild_id_str,))
+    
+    # 讀取敏感詞與對應的時間格式字串
+    cursor.execute("SELECT banned_word, duration_str FROM mutes WHERE guild_id = ?", (guild_id_str,))
     banned_words = cursor.fetchall()
     
-    for word, mins in banned_words:
+    for word, duration_str in banned_words:
         if word in message.content:
+            # 解析動態時間格式
+            delta, _ = parse_mute_duration(duration_str)
+            if not delta:
+                delta = datetime.timedelta(minutes=10) # 格式萬一損毀的備用安全機制
+                
             try:
-                await message.author.timeout(datetime.timedelta(minutes=mins), reason="Triggered server filtered banned word")
-                await message.delete()
-                await message.channel.send(f"🚫 {message.author.mention} triggered a sensitive banned word! Their message was deleted and they have been timed out for `{mins}` minutes.")
+                # 執行禁言懲罰
+                await message.author.timeout(delta, reason=f"Triggered server filtered banned word: {word}")
+                
+                # 完美還原 Image 5 嘲諷卡片：不刪除原訊息，直接原地發送
+                embed = discord.Embed(
+                    title="HAHAHA 😂",
+                    description=f"{message.author.name} has been muted for {duration_str} due to he/she sent the message \"{message.content}\", you can try and be the next!",
+                    color=0xe74c3c  # 紅色系邊框
+                )
+                embed.set_footer(text=f"{message.guild.name} | 67")
+                
+                await message.channel.send(embed=embed)
                 conn.close()
-                return
+                return  # 攔截成功，中斷後續邏輯避免重複觸發
             except discord.Forbidden:
                 print(f"⚠️ [Security] Failed to timeout member due to lack of sufficient bot permissions.")
             except Exception as e:
                 print(f"⚠️ [Security] Banned word interception routine error: {e}")
 
+    # --- 經驗值與升級模組 ---
     user_id_str = str(message.author.id)
     cursor.execute("SELECT chars, level FROM levels WHERE user_id = ?", (user_id_str,))
     row = cursor.fetchone()
