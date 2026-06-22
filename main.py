@@ -5,17 +5,18 @@ import random
 import datetime
 import os
 import sqlite3
+import io
+from PIL import Image  # 用於分析新成員頭像的主色
 
 # =================================================================
 # 📝 【手動自訂狀態列欄位】
 # 你可以在這個陣列裡自由增加、刪除或修改機器人要輪播的「正在觀看」訊息。
-# 每一條訊息請用雙引號包起來，並用逗號隔開。
 # =================================================================
 WATCHING_STATUSES = [
     "67",                  # 目前指定的初始狀態
-    "/help",    # 你可以把這幾行刪掉，或自己加更多進去！
-    "Six Seven",
-    "Auto Mute"
+    "📜 /help 查看指令",    
+    "📊 成員等級排行",
+    "🔒 禁字全天候監控"
 ]
 # =================================================================
 
@@ -42,6 +43,7 @@ class MyBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=discord.Intents.all())
         self.status_index = 0  # 用於紀錄目前輪播到第幾個狀態
+        self.invites = {}      # 記憶體快取：儲存各伺服器的邀請碼結構 { guild_id: [邀請碼清單] }
 
     async def setup_hook(self):
         self.check_time_announcements.start()  # 啟動自動報時檢查
@@ -55,22 +57,17 @@ class MyBot(commands.Bot):
         if not WATCHING_STATUSES:
             return
 
-        # 防呆：如果手動刪除陣列導致索引溢出，立刻歸零
         if self.status_index >= len(WATCHING_STATUSES):
             self.status_index = 0
 
-        # 取出當前要顯示的字串
         current_status = WATCHING_STATUSES[self.status_index]
 
-        # 變更機器人狀態為「正在觀看 XXX」
         await self.change_presence(
             activity=discord.Activity(
                 type=discord.ActivityType.watching,
                 name=current_status
             )
         )
-
-        # 索引指向下一個狀態
         self.status_index += 1
 
     @rotate_status.before_loop
@@ -99,6 +96,29 @@ class MyBot(commands.Bot):
 
 bot = MyBot()
 
+# --- 邀請碼快取追蹤機制 ---
+@bot.event
+async def on_ready():
+    # 當機器人成功連線，把所有伺服器的現有邀請碼與其使用次數記錄下來
+    for guild in bot.guilds:
+        try:
+            bot.invites[guild.id] = await guild.invites()
+        except discord.Forbidden:
+            pass
+    print(f"✅ 邀請碼快取載入完畢，目前正在監控 {len(bot.guilds)} 個伺服器的邀請碼動態。")
+
+@bot.event
+async def on_guild_join(guild):
+    try:
+        bot.invites[guild.id] = await guild.invites()
+    except discord.Forbidden:
+        pass
+
+@bot.event
+async def on_guild_remove(guild):
+    bot.invites.pop(guild.id, None)
+
+
 # --- UI 互動組件 (Modals & Views) ---
 
 class ManualMsgModal(discord.ui.Modal, title="手動發送自訂訊息"):
@@ -112,7 +132,13 @@ class WelcomeModal(discord.ui.Modal, title="設定歡迎訊息內容"):
     def __init__(self, channel: discord.abc.GuildChannel):
         super().__init__()
         self.channel = channel
-    msg_input = discord.ui.TextInput(label="歡迎訊息文字", style=discord.TextStyle.paragraph)
+        
+    # 預填的格式（文字將顯示在內文 Description 裡，Title 則會鎖定為大標題）
+    msg_input = discord.ui.TextInput(
+        label="歡迎訊息內文模板", 
+        style=discord.TextStyle.paragraph,
+        default="You are the {member.count} member here!\nInviter: {inviter.name}"
+    )
 
     async def on_submit(self, interaction: discord.Interaction):
         conn = sqlite3.connect(DB_PATH)
@@ -121,7 +147,7 @@ class WelcomeModal(discord.ui.Modal, title="設定歡迎訊息內容"):
                        (str(interaction.guild_id), str(self.channel.id), self.msg_input.value))
         conn.commit()
         conn.close()
-        await interaction.response.send_message(f"✅ 歡迎頻道已設定為：{self.channel.mention}", ephemeral=True)
+        await interaction.response.send_message(f"✅ 歡迎頻道已設定為：{self.channel.mention}，已成功開啟卡片美化外觀！", ephemeral=True)
 
 class LevelUpModal(discord.ui.Modal, title="自訂升級通知訊息"):
     def __init__(self, channel: discord.abc.GuildChannel):
@@ -252,20 +278,72 @@ async def setlevelup(interaction: discord.Interaction, channel: discord.abc.Guil
     await interaction.response.send_modal(LevelUpModal(channel))
 
 
-# --- 事件監聽 ---
+# --- 事件監聽區 (Events) ---
 
 @bot.event
 async def on_member_join(member: discord.Member):
+    guild = member.guild
+    
+    # 1. 🔍 追蹤是誰邀請的 (Invite Tracker)
+    inviter_name = "未知"
+    try:
+        old_invites = bot.invites.get(guild.id, [])
+        new_invites = await guild.invites()
+        bot.invites[guild.id] = new_invites  # 即時更新記憶體快取
+        
+        for old_inv in old_invites:
+            for new_inv in new_invites:
+                if old_inv.code == new_inv.code and new_inv.uses > old_inv.uses:
+                    inviter_name = new_inv.inviter.name
+                    break
+    except Exception as e:
+        print(f"邀請碼追蹤失敗: {e}")
+
+    # 2. 🗄️ 讀取資料庫歡迎設定
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT channel_id, message FROM welcome WHERE guild_id = ?", (str(member.guild.id),))
+    cursor.execute("SELECT channel_id, message FROM welcome WHERE guild_id = ?", (str(guild.id),))
     row = cursor.fetchone()
     conn.close()
+    
     if row:
         channel = bot.get_channel(int(row[0]))
         if channel:
-            text = row[1].replace("{user.mention}", member.mention).replace("{user.name}", member.name)
-            await channel.send(text)
+            # 3. 🎨 核心技術：下載頭像並將其壓縮至 1x1 像素以取得「主要色彩」
+            avatar_color = discord.Color.blue()  # 預設防錯顏色
+            try:
+                avatar_bytes = await member.display_avatar.read()
+                img = Image.open(io.BytesIO(avatar_bytes))
+                img = img.resize((1, 1))
+                rgb = img.getpixel((0, 0))
+                
+                # 處理黑白頭像、單色調或透明背景的色彩格式防錯
+                if isinstance(rgb, int):
+                    avatar_color = discord.Color.from_rgb(rgb, rgb, rgb)
+                else:
+                    avatar_color = discord.Color.from_rgb(rgb[0], rgb[1], rgb[2])
+            except Exception as color_err:
+                print(f"新成員頭像主色提取失敗: {color_err}")
+
+            # 4. 📝 變數置換與排版拆分
+            raw_text = row[1]
+            
+            # Embed 的 Title 欄位設定為純文字標題
+            title_text = f"Hey, welcome to {guild.name}!!!"
+            
+            # Embed 的 Description 內文替換變數
+            description_text = raw_text.replace("{member.count}", str(guild.member_count))\
+                                       .replace("{inviter.name}", inviter_name)\
+                                       .replace("{user.name}", member.name)\
+                                       .replace("{server.name}", guild.name)
+
+            # 5. 🖼️ 建立 Embed (完美對齊預覽圖結構)
+            embed = discord.Embed(title=title_text, description=description_text, color=avatar_color)
+            embed.set_thumbnail(url=member.display_avatar.url)  # 右側放置加入者的頭像
+            embed.set_footer(text=f"{guild.name} | 67")          # 頁尾資訊
+
+            # 🚀 關鍵修改：將真正能觸發通知的 @成員 擺在 Embed 外面的最上方發送
+            await channel.send(content=f"{member.mention}", embed=embed)
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -309,7 +387,7 @@ async def on_message(message: discord.Message):
     cursor.execute("INSERT OR REPLACE INTO levels (user_id, chars, level) VALUES (?, ?, ?)", (u_id, chars, lvl))
     conn.commit()
 
-    # C. 升級通知（已修改：未經設定不發送任何訊息）
+    # C. 升級通知 (若未用 /setlevelup 設定好，背後照算但絕不發言打擾)
     if level_up:
         cursor.execute("SELECT channel_id, message FROM levelup WHERE guild_id = ?", (str(message.guild.id),))
         l_row = cursor.fetchone()
@@ -322,5 +400,6 @@ async def on_message(message: discord.Message):
     conn.close()
     await bot.process_commands(message)
 
-# 啟動
+# 啟動機器人
 bot.run(os.getenv("DISCORD_TOKEN"))
+        
