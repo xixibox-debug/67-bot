@@ -13,9 +13,9 @@ import sqlite3
 # =================================================================
 WATCHING_STATUSES = [
     "67",                  # 目前指定的初始狀態
-    "/help",    # 你可以把這幾行刪掉，或自己加更多進去！
-    "Six Seven",
-    "🔒 Auto Mute"
+    "📜 /help 查看指令",    # 你可以把這幾行刪掉，或自己加更多進去！
+    "📊 成員等級排行",
+    "🔒 禁字全天候監控"
 ]
 # =================================================================
 
@@ -309,7 +309,7 @@ async def on_message(message: discord.Message):
     cursor.execute("INSERT OR REPLACE INTO levels (user_id, chars, level) VALUES (?, ?, ?)", (u_id, chars, lvl))
     conn.commit()
 
-    # C. 升級通知
+    # C. 升級通知（已修改：未經設定不發送任何訊息）
     if level_up:
         cursor.execute("SELECT channel_id, message FROM levelup WHERE guild_id = ?", (str(message.guild.id),))
         l_row = cursor.fetchone()
@@ -318,12 +318,9 @@ async def on_message(message: discord.Message):
             if ch:
                 tx = l_row[1].replace("{user.mention}", message.author.mention).replace("{user.name}", message.author.name).replace("{user.level}", str(lvl))
                 await ch.send(tx)
-        else:
-            await message.channel.send(f"🎉 恭喜 {message.author.mention} 升級到了 **Lv. {lvl}**！")
 
     conn.close()
     await bot.process_commands(message)
 
 # 啟動
 bot.run(os.getenv("DISCORD_TOKEN"))
-  
