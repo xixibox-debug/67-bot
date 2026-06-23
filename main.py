@@ -216,27 +216,29 @@ def parse_mute_duration(duration_str: str):
 # 🖥️ 5. INTERACTIVE UI COMPONENTS (MODALS & VIEWS)
 # =================================================================
 
-class ManualMsgModal(discord.ui.Modal, title="Send Plain Text Message"):
+class ManualMsgModal(discord.ui.Modal, title="發送純文字訊息"):
+    # 修正：縮短 Label 字數以防極限過長
     msg_input = discord.ui.TextInput(
-        label="Enter the message content to broadcast", 
+        label="請輸入要廣播的訊息內容", 
         style=discord.TextStyle.paragraph,
-        placeholder="Type your text here...",
+        placeholder="在此輸入文字...",
         required=True
     )
     
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.channel.send(content=self.msg_input.value)
-        await interaction.response.send_message("✅ Message successfully sent as plain text.", ephemeral=True)
+        await interaction.response.send_message("✅ 訊息已成功以純文字形式發送。", ephemeral=True)
 
 
 class WelcomeModal(discord.ui.Modal):
     """/setwelcome 專用彈出式視窗：儲存後直接在悄悄話下方塞入完全模擬的測試卡片"""
     def __init__(self, channel: discord.TextChannel):
-        super().__init__(title="Setup Server Welcome Message")
+        super().__init__(title="設定伺服器歡迎訊息")
         self.channel = channel
         
+    # 修正：原字串 46 字元爆上限，現改為簡潔中文（嚴格限制在 45 字元內）
     msg_input = discord.ui.TextInput(
-        label="Welcome Message Template (Use variables below)",
+        label="歡迎訊息內文 (可使用下方支援變數)",
         style=discord.TextStyle.paragraph,
         default="You are the {member.count} member here!\nInviter: {inviter.name}",
         required=True
@@ -287,7 +289,7 @@ class WelcomeModal(discord.ui.Modal):
         embed.set_footer(text=footer_text)
 
         confirmation_content = (
-            f"✅ **Welcome settings configured successfully!** Messages bound to {self.channel.mention}.\n"
+            f"✅ **歡迎訊息設定成功！** 頻道已綁定至 {self.channel.mention}。\n"
             f"--- \n"
             f"👁️ **【歡迎卡片效果即時測試預覽】** (此為悄悄話，僅有你能看見測試畫面)：\n"
             f"{member.mention}"
@@ -302,11 +304,12 @@ class WelcomeModal(discord.ui.Modal):
 
 class LevelUpModal(discord.ui.Modal):
     def __init__(self, channel: discord.TextChannel):
-        super().__init__(title="Customize Level Up Message")
+        super().__init__(title="設定自訂升級通知")
         self.channel = channel
         
+    # 修正：原字串 63 字元嚴重超標，現改為精簡中文標籤
     msg_input = discord.ui.TextInput(
-        label="Notification content (Supports {user.mention} and {user.level})",
+        label="通知內文 (支援 {user.mention} 與 {user.level})",
         style=discord.TextStyle.paragraph,
         default="🎉 Congratulations {user.mention}, you leveled up to **Lv. {user.level}**!",
         required=True
@@ -322,7 +325,7 @@ class LevelUpModal(discord.ui.Modal):
         conn.commit()
         conn.close()
         await interaction.response.send_message(
-            f"✅ Level up notifications successfully bound to channel: {self.channel.mention}!", 
+            f"✅ 等級提升通知已成功綁定至頻道：{self.channel.mention}！", 
             ephemeral=True
         )
 
@@ -336,9 +339,9 @@ class RemoveTimeSelect(discord.ui.Select):
             options.append(discord.SelectOption(
                 label=f"[{t_time}] {short_msg}", 
                 value=str(db_id),
-                description="Click to remove this schedule from the system"
+                description="點擊從系統中刪除此排程"
             ))
-        super().__init__(placeholder="Select an automated announcement schedule to remove...", options=options)
+        super().__init__(placeholder="請選擇要移除的自動報時排程...", options=options)
 
     async def callback(self, interaction: discord.Interaction):
         conn = sqlite3.connect(DB_PATH)
@@ -346,7 +349,7 @@ class RemoveTimeSelect(discord.ui.Select):
         cursor.execute("DELETE FROM announcements WHERE id = ?", (self.values[0],))
         conn.commit()
         conn.close()
-        await interaction.response.send_message("🗑️ The automated announcement schedule has been completely removed from the database.", ephemeral=True)
+        await interaction.response.send_message("🗑️ 該自動報時排程已完全從資料庫中移除。", ephemeral=True)
 
 
 class RemoveTimeView(discord.ui.View):
@@ -509,16 +512,13 @@ async def unmute(interaction: discord.Interaction, user: discord.Member):
         await interaction.response.send_message(f"❌ 發生未知錯誤: {e}", ephemeral=True)
 
 
-# --- 🛡️ NEW: /kick 踢出成員指令 (外觀比照 /mute 綠色面板) ---
 @bot.tree.command(name="kick", description="Kick a server member with a beautiful green embed report")
 @app_commands.describe(user="The member to kick", reason="Reason for kick (Optional)")
 @app_commands.checks.has_permissions(kick_members=True)
 async def kick(interaction: discord.Interaction, user: discord.Member, reason: str = "None"):
     try:
-        # 執行踢出
         await user.kick(reason=reason)
         
-        # 建立與 /mute 風格一致的嵌入面板
         embed = discord.Embed(
             title=f"✅ {user.name} has been kicked.", 
             color=0x2ecc71,  
@@ -727,26 +727,23 @@ async def on_message(message: discord.Message):
     
     for word, duration_str in banned_words:
         if word in message.content:
-            # 解析動態時間格式
             delta, _ = parse_mute_duration(duration_str)
             if not delta:
-                delta = datetime.timedelta(minutes=10) # 格式萬一損毀的備用安全機制
+                delta = datetime.timedelta(minutes=10)
                 
             try:
-                # 執行禁言懲罰
                 await message.author.timeout(delta, reason=f"Triggered server filtered banned word: {word}")
                 
-                # 完美還原 Image 5 嘲諷卡片：不刪除原訊息，直接原地發送
                 embed = discord.Embed(
                     title="HAHAHA 😂",
                     description=f"{message.author.name} has been muted for {duration_str} due to he/she sent the message \"{message.content}\", you can try and be the next!",
-                    color=0xe74c3c  # 紅色系邊框
+                    color=0xe74c3c
                 )
                 embed.set_footer(text=f"{message.guild.name} | 67")
                 
                 await message.channel.send(embed=embed)
                 conn.close()
-                return  # 攔截成功，中斷後續邏輯避免重複觸發
+                return
             except discord.Forbidden:
                 print(f"⚠️ [Security] Failed to timeout member due to lack of sufficient bot permissions.")
             except Exception as e:
