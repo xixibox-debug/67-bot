@@ -567,7 +567,6 @@ async def on_member_join(member: discord.Member):
 
 @bot.event
 async def on_member_remove(member: discord.Member):
-    """補回原本漏掉的退出伺服器監聽器，精準抓取退出卡片設定與頭像色調"""
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
     cursor.execute("SELECT channel_id, g_title, g_desc FROM welcome WHERE guild_id = ?", (str(member.guild.id),))
     row = cursor.fetchone(); conn.close()
@@ -577,7 +576,7 @@ async def on_member_remove(member: discord.Member):
             title = parse_placeholders(row[1] or "Goodbye!", member, member.guild)
             desc = parse_placeholders(row[2], member, member.guild)
             
-            embed_color = discord.Color(0xe74c3c) # 預設退出微紅色
+            embed_color = discord.Color(0xe74c3c)
             try:
                 from PIL import Image
                 import io
@@ -598,9 +597,13 @@ async def on_member_remove(member: discord.Member):
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot or not message.guild: return
-    cleaned = re.sub(r'<@&?\d+>|<#\d+>|<@!\d+>', '', message.content)
+
+    # 🛡️ 深度消毒消毒器：全面過濾成員/身份組/頻道標記、自訂表情/貼圖語法 `<...:ID>` 與時間戳記，杜絕 ID 碰巧含 67 的誤觸
+    cleaned = re.sub(r'<@!?\d+>|<@&\d+>|<#\d+>|<a?:[a-zA-Z0-9_]+:\d+>|<t:\d+(?::[a-zA-Z])?>', '', message.content)
+    
+    # 🎯 純文字核對 67（含繪文字 6️⃣7️⃣ 備援）
     if "67" in cleaned or "6️⃣7️⃣" in cleaned:
-        await message.reply("# 67!!!!!")
+        await message.reply(f"# {message.author.mention} 67!!!!!")
 
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
     cursor.execute("SELECT banned_word, duration_str FROM mutes WHERE guild_id = ?", (str(message.guild.id),))
