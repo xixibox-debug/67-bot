@@ -20,7 +20,7 @@ WATCHING_STATUSES = [
     "24/7 Auto Mute"
 ]
 
-# 備份防歸零優化：優先讀取雲端平台的持久化空間路徑，若無則使用本地 data/bot.db
+# Railway 持久化空間路徑優化
 DB_PATH = os.getenv("DATABASE_PATH", "data/bot.db")
 if os.path.dirname(DB_PATH):
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -72,7 +72,7 @@ def init_db():
         )
     """)
     
-    # 自動 Mute 禁字防護表（欄位格式保持 TEXT 相容性）
+    # 自動 Mute 禁字防護表
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS mutes (
             guild_id TEXT, 
@@ -97,7 +97,7 @@ class SixSevenBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
         self.status_index = 0
         self.invites = {}
-        self.last_announced_minute = ""  # 用於精準防漂移報時鎖
+        self.last_announced_minute = "" 
 
     async def setup_hook(self):
         """當機器人啟動時，負責掛載背景任務與同步斜線指令"""
@@ -708,19 +708,20 @@ async def on_member_join(member: discord.Member):
 
 @bot.event
 async def on_message(message: discord.Message):
-    # 🛑 安全防禦第一關：不回應任何機器人（包括自己），嚴防死循環
+    # 🛑 安全防禦：不回應任何機器人，防死循環
     if message.author.bot or not message.guild:
         return
 
-    # 🎰 新功能：24/7 全天候 67 核心魔術字隨機「回覆」偵測
-    # 支援一般數字 67 與 Discord 內建 Unicode 數字鍵帽代碼 6️⃣7️⃣
-    if "67" in message.content or "6️⃣7️⃣" in message.content:
+    # 🎰 修正：24/7 全天候 67 隨機大標題回覆系統（新增過濾 Discord 內置 ID 功能）
+    # 先過濾掉所有 Discord 的標記（如成員 @、身分組 @、頻道 #、自訂表情符號），防止 ID 內包含 67 誤觸
+    cleaned_content = re.sub(r'<@!?\d+>|<@&\d+>|<#\d+>|<a?:.+?:\d+>', '', message.content)
+
+    if "67" in cleaned_content or "6️⃣7️⃣" in cleaned_content:
         lucky_responses = [
             f"# {message.author.mention}, 67!!!!!",
             f"# {message.author.mention}, six seven!!!!!"
         ]
         try:
-            # 使用 reply() 能自動附帶原訊息引用與通知
             await message.reply(content=random.choice(lucky_responses))
         except Exception as err:
             print(f"⚠️ [67 Reply System] Auto-reply triggered an error: {err}")
@@ -730,7 +731,7 @@ async def on_message(message: discord.Message):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # 讀取敏感詞與對應的時間格式字串
+    # 讀取敏感詞
     cursor.execute("SELECT banned_word, duration_str FROM mutes WHERE guild_id = ?", (guild_id_str,))
     banned_words = cursor.fetchall()
     
