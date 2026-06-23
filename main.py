@@ -33,7 +33,7 @@ def init_db():
     """初始化 SQLite 所有功能資料表"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # 歡迎與告別設定表 (包含 4 個自訂欄位)
+    # 歡迎與告別設定表
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS welcome (
             guild_id TEXT PRIMARY KEY, channel_id TEXT, 
@@ -57,7 +57,7 @@ init_db()
 # 🔄 3. CORE UTILITIES (核心工具函式與自訂變數解析)
 # =================================================================
 def parse_placeholders(text: str, member: discord.Member, guild: discord.Guild, inviter: discord.Member = None, extra: dict = None) -> str:
-    """變數解析器：將字串中的 {user.name} 等替換為 Discord 真實資料，並支援自訂變數擴充"""
+    """變數解析器：將字串中的 {user.name} 等替換為 Discord 真實資料"""
     if not text: return ""
     reps = {
         "{user.mention}": member.mention if member else "",
@@ -131,11 +131,20 @@ class SixSevenBot(commands.Bot):
 bot = SixSevenBot()
 
 # =================================================================
-# 🖥️ 5. INTERACTIVE UI (MODALS & VIEWS - 全英文設定介面)
+# 🖥️ 5. INTERACTIVE UI (MODALS & VIEWS - 整合安全生命週期管理)
 # =================================================================
 
-class WelcomeGoodbyeModal(ui.Modal, title="Set Welcome Message"):
-    """符合截圖 2 設計的歡迎與告別字卡設定視窗"""
+class ManualMsgModal(ui.Modal, title="Send Manual Message"):
+    """手動發送訊息的輸入框 - 原封不動發送純文字"""
+    text = ui.TextInput(label="Message Content", style=discord.TextStyle.paragraph, required=True, placeholder="Type your text here...")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.channel.send(self.text.value)
+        await interaction.response.send_message("✅ Raw text message sent successfully.", ephemeral=True)
+
+
+class WelcomeGoodbyeModal(ui.Modal, title="Set Welcome Message Text"):
+    """設定歡迎與告別內文視窗"""
     w_title = ui.TextInput(label="Enter Embed Title of Welcome message", placeholder="Hey, welcome to {guild.name}!!!", required=False)
     w_desc = ui.TextInput(label="Enter Embed Description of Welcome message *", placeholder="You are the {member.count} member here!\nInviter: {inviter.name}", required=True, style=discord.TextStyle.long)
     g_title = ui.TextInput(label="Enter Embed Title of Goodbye message", placeholder="{user.name} has leave the server", required=False)
@@ -143,16 +152,55 @@ class WelcomeGoodbyeModal(ui.Modal, title="Set Welcome Message"):
 
     async def on_submit(self, interaction: discord.Interaction):
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute("SELECT channel_id FROM welcome WHERE guild_id = ?", (str(interaction.guild_id),))
+        row = cursor.fetchone()
+        cid = row[0] if row else str(interaction.channel_id)
+        
         cursor.execute("INSERT OR REPLACE INTO welcome VALUES (?, ?, ?, ?, ?, ?)", 
-                       (str(interaction.guild_id), str(interaction.channel_id), self.w_title.value, self.w_desc.value, self.g_title.value, self.g_desc.value))
+                       (str(interaction.guild_id), cid, self.w_title.value, self.w_desc.value, self.g_title.value, self.g_desc.value))
         conn.commit(); conn.close()
 
         w_t = parse_placeholders(self.w_title.value or self.w_title.placeholder, interaction.user, interaction.guild)
         w_d = parse_placeholders(self.w_desc.value, interaction.user, interaction.guild)
         
-        embed = discord.Embed(title=w_t, description=w_d, color=0x54a7dd)
+        embed = discord.Embed(title=w_t, description=w_d, color=interaction.user.color)
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
-        await interaction.response.send_message(content="✅ **Settings Saved!** Preview:", embed=embed, ephemeral=True)
+        await interaction.response.send_message(content="✅ **Embed Text Content Saved!** Preview:", embed=embed, ephemeral=True)
+
+
+class WelcomeConfigView(ui.View):
+    """歡迎面板專屬子管理面板 (包含設定發送頻道與取消設定)"""
+    def __init__(self): super().__init__(timeout=300)
+    
+    @ui.select(cls=ui.ChannelSelect, channel_types=[discord.ChannelType.text], placeholder="🎯 Select Welcome Alert Channel")
+    async def set_channel(self, interaction: discord.Interaction, select: ui.ChannelSelect):
+        cid = select.values[0].id
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute("SELECT w_title, w_desc, g_title, g_desc FROM welcome WHERE guild_id = ?", (str(interaction.guild_id),))
+        row = cursor.fetchone()
+        if row:
+            cursor.execute("UPDATE welcome SET channel_id = ? WHERE guild_id = ?", (str(cid), str(interaction.guild_id)))
+        else:
+            cursor.execute("INSERT INTO welcome VALUES (?, ?, '', '', '', '')", (str(interaction.guild_id), str(cid)))
+        conn.commit(); conn.close()
+        await interaction.response.send_message(f"🎯 Target log channel set to {select.values[0].mention}", ephemeral=True)
+
+    @ui.button(label="📝 Edit Cards (Modal)", style=discord.ButtonStyle.primary)
+    async def edit_msg(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_modal(WelcomeGoodbyeModal())
+
+    @ui.button(label="❌ Disable / Reset Panel", style=discord.ButtonStyle.danger)
+    async def reset_panel(self, interaction: discord.Interaction, button: ui.Button):
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute("DELETE FROM welcome WHERE guild_id = ?", (str(interaction.guild_id),))
+        conn.commit(); conn.close()
+        await interaction.response.send_message("🗑️ Welcome/Goodbye feature disabled and settings cleared from database.", ephemeral=True)
+
+    @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary)
+    async def back(self, interaction: discord.Interaction, button: ui.Button):
+        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nAuto Mute\nTime Message")
+        await interaction.response.edit_message(embed=embed, view=SettingsView())
+
 
 class LevelMessageModal(ui.Modal, title="Set Level Up Message"):
     level_msg = ui.TextInput(label="Enter Level Up Message *", placeholder="Congrats {user.mention}! Level {level}!", required=True, style=discord.TextStyle.long)
@@ -163,9 +211,9 @@ class LevelMessageModal(ui.Modal, title="Set Level Up Message"):
         row = cursor.fetchone(); cid = row[0] if row else None
         cursor.execute("INSERT OR REPLACE INTO levelup VALUES (?, ?, ?)", (str(interaction.guild_id), cid, self.level_msg.value))
         conn.commit(); conn.close()
-        
         preview = parse_placeholders(self.level_msg.value, interaction.user, interaction.guild, extra={"level": "5"})
         await interaction.response.send_message(f"✅ **Message Saved!** Preview: {preview}", ephemeral=True)
+
 
 class LevelSettingsView(ui.View):
     def __init__(self): super().__init__(timeout=180)
@@ -183,40 +231,168 @@ class LevelSettingsView(ui.View):
     async def mod_text(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(LevelMessageModal())
 
+
 class AutoMuteModal(ui.Modal, title="Add Banned Word"):
     word = ui.TextInput(label="Enter Banned Word", required=True)
-    time = ui.TextInput(label="Mute Duration (e.g., 10m, 1h)", default="10m", required=True)
+    time = ui.TextInput(label="Mute Duration (e.g., 1m, 3m, 1h, 2d)", default="10m", required=True)
+    
+    def __init__(self, view: 'AutoMuteConfigView'):
+        super().__init__()
+        self.view = view
+
     async def on_submit(self, interaction: discord.Interaction):
         if self.word.value == "67": return await interaction.response.send_message("Cannot block '67'!", ephemeral=True)
+        _, err = parse_mute_duration(self.time.value)
+        if err: return await interaction.response.send_message(f"❌ {err}", ephemeral=True)
+        
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
         cursor.execute("INSERT OR REPLACE INTO mutes VALUES (?, ?, ?)", (str(interaction.guild_id), self.word.value, self.time.value))
         conn.commit(); conn.close()
-        await interaction.response.send_message(f"🔒 Banned word `{self.word.value}` added.", ephemeral=True)
+        
+        self.view.update_select_menu()
+        await interaction.response.edit_message(view=self.view)
+        await interaction.followup.send(f"🔒 Banned word `{self.word.value}` added.", ephemeral=True)
+
+
+class BannedWordDeleteSelect(ui.Select):
+    """用來即時取消、刪除敏感詞的下拉式選單"""
+    def __init__(self, options):
+        super().__init__(placeholder="🗑️ Select a word to CANCEL / REMOVE rule", min_values=1, max_values=1, options=options, row=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        word = self.values[0]
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute("DELETE FROM mutes WHERE guild_id = ? AND banned_word = ?", (str(interaction.guild_id), word))
+        conn.commit(); conn.close()
+        
+        self.view.update_select_menu()
+        await interaction.response.edit_message(view=self.view)
+        await interaction.followup.send(f"✅ Cancelled and removed filter rule for: `{word}`", ephemeral=True)
+
+
+class AutoMuteConfigView(ui.View):
+    """Auto Mute 專屬子管理選單"""
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=300)
+        self.guild_id = guild_id
+        self.update_select_menu()
+
+    def update_select_menu(self):
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute("SELECT banned_word FROM mutes WHERE guild_id = ?", (str(self.guild_id),))
+        words = cursor.fetchall(); conn.close()
+        
+        for child in self.children.copy():
+            if isinstance(child, BannedWordDeleteSelect):
+                self.remove_item(child)
+        
+        if words:
+            options = [discord.SelectOption(label=f"Remove: {w[0]}", value=w[0]) for w in words[:25]]
+            self.add_item(BannedWordDeleteSelect(options))
+
+    @ui.button(label="➕ Add Banned Word", style=discord.ButtonStyle.success, row=0)
+    async def add_word(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_modal(AutoMuteModal(self))
+
+    @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=0)
+    async def back(self, interaction: discord.Interaction, button: ui.Button):
+        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nAuto Mute\nTime Message")
+        await interaction.response.edit_message(embed=embed, view=SettingsView())
+
 
 class AnnouncementModal(ui.Modal, title="Add Time Message"):
     t_time = ui.TextInput(label="Time (HH:MM)", placeholder="08:00", max_length=5, required=True)
     msg = ui.TextInput(label="Message Content", style=discord.TextStyle.paragraph, required=True)
+    
+    def __init__(self, view: 'TimeMessageConfigView'):
+        super().__init__()
+        self.view = view
+
     async def on_submit(self, interaction: discord.Interaction):
-        if ":" not in self.t_time.value: return await interaction.response.send_message("Invalid time!", ephemeral=True)
+        if ":" not in self.t_time.value: return await interaction.response.send_message("Invalid time format!", ephemeral=True)
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
         cursor.execute("INSERT INTO announcements (time, message, channel_id) VALUES (?, ?, ?)", (self.t_time.value, self.msg.value, str(interaction.channel_id)))
         conn.commit(); conn.close()
-        await interaction.response.send_message(f"⏰ Announcement set at {self.t_time.value}", ephemeral=True)
+        
+        self.view.update_select_menu()
+        await interaction.response.edit_message(view=self.view)
+        await interaction.followup.send(f"⏰ Announcement scheduler set at {self.t_time.value}", ephemeral=True)
+
+
+class TimeMessageDeleteSelect(ui.Select):
+    """用來即時取消、刪除定時排程訊息的下拉式選單"""
+    def __init__(self, options):
+        super().__init__(placeholder="🗑️ Select an announcement schedule to CANCEL", min_values=1, max_values=1, options=options, row=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        rid = self.values[0]
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute("DELETE FROM announcements WHERE id = ?", (rid,))
+        conn.commit(); conn.close()
+        
+        self.view.update_select_menu()
+        await interaction.response.edit_message(view=self.view)
+        await interaction.followup.send("✅ Scheduled announcement has been cancelled and deleted.", ephemeral=True)
+
+
+class TimeMessageConfigView(ui.View):
+    """Time Message 專屬子管理選單"""
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=300)
+        self.guild_id = guild_id
+        self.update_select_menu()
+
+    def update_select_menu(self):
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute("SELECT id, time, message, channel_id FROM announcements")
+        all_rows = cursor.fetchall(); conn.close()
+        
+        for child in self.children.copy():
+            if isinstance(child, TimeMessageDeleteSelect):
+                self.remove_item(child)
+        
+        valid_options = []
+        for rid, t_time, msg, cid in all_rows:
+            channel = interaction_client = bot.get_channel(int(cid))
+            if channel and channel.guild.id == self.guild_id:
+                short_msg = msg[:20] + "..." if len(msg) > 20 else msg
+                valid_options.append(discord.SelectOption(label=f"[{t_time}] {short_msg}", value=str(rid)))
+        
+        if valid_options:
+            self.add_item(TimeMessageDeleteSelect(valid_options[:25]))
+
+    @ui.button(label="⏰ Add Time Message", style=discord.ButtonStyle.success, row=0)
+    async def add_time(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_modal(AnnouncementModal(self))
+
+    @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=0)
+    async def back(self, interaction: discord.Interaction, button: ui.Button):
+        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nAuto Mute\nTime Message")
+        await interaction.response.edit_message(embed=embed, view=SettingsView())
+
 
 class SettingsView(ui.View):
+    """主控面板控制 View 介面"""
     def __init__(self): super().__init__(timeout=None)
+    
     @ui.button(label="Welcome/Goodbye Panel", style=discord.ButtonStyle.secondary, emoji="👋")
     async def btn_w(self, interaction: discord.Interaction, btn: ui.Button):
-        await interaction.response.send_modal(WelcomeGoodbyeModal())
+        embed = discord.Embed(title="👋 Welcome & Goodbye Settings", color=0x54a7dd, description="Configure channel routing and text cards below.")
+        await interaction.response.edit_message(embed=embed, view=WelcomeConfigView())
+        
     @ui.button(label="Level System", style=discord.ButtonStyle.secondary, emoji="🎉")
     async def btn_l(self, interaction: discord.Interaction, btn: ui.Button):
         await interaction.response.send_message("📈 **Level System Configuration**", view=LevelSettingsView(), ephemeral=True)
+        
     @ui.button(label="Auto Mute", style=discord.ButtonStyle.secondary, emoji="🔒")
     async def btn_a(self, interaction: discord.Interaction, btn: ui.Button):
-        await interaction.response.send_modal(AutoMuteModal())
+        embed = discord.Embed(title="🔒 Auto Mute Filter Config Hub", color=0xff0000, description="Create text filtering parameters or remove existing configurations below.")
+        await interaction.response.edit_message(embed=embed, view=AutoMuteConfigView(interaction.guild_id))
+        
     @ui.button(label="Time Message", style=discord.ButtonStyle.secondary, emoji="⏰")
     async def btn_t(self, interaction: discord.Interaction, btn: ui.Button):
-        await interaction.response.send_modal(AnnouncementModal())
+        embed = discord.Embed(title="⏰ Time Message Alerts Hub", color=0x3498db, description="Schedule timed standard text warnings or clear past records below.")
+        await interaction.response.edit_message(embed=embed, view=TimeMessageConfigView(interaction.guild_id))
 
 # =================================================================
 # 🚀 6. SLASH COMMANDS (全 9 個指令 - 嚴格按照規定順序與參數命名)
@@ -235,26 +411,21 @@ async def help_cmd(interaction: discord.Interaction):
 @bot.tree.command(name="settings", description="Open bot configuration hub")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def settings(interaction: discord.Interaction):
-    """主控面板指令 - 渲染截圖 1 的黃條 Embed 樣式"""
-    embed = discord.Embed(
-        title="Settings", 
-        color=0xdfe600, 
-        description="Welcome/Goodbye Panel\nLevel System\nAuto Mute\nTime Message"
-    )
+    """主控面板指令 - 黃條 Embed"""
+    embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nAuto Mute\nTime Message")
     await interaction.response.send_message(embed=embed, view=SettingsView())
 
 # --- 3. /manualmsg ---
 @bot.tree.command(name="manualmsg", description="Send manual text message as bot")
-async def manualmsg(interaction: discord.Interaction, text: str):
-    """手動發送訊息指令"""
-    await interaction.channel.send(text)
-    await interaction.response.send_message("✅ Message sent.", ephemeral=True)
+async def manualmsg(interaction: discord.Interaction):
+    """手動發送訊息指令 - 完全改為彈出 Modal"""
+    await interaction.response.send_modal(ManualMsgModal())
 
 # --- 4. /mute ---
 @bot.tree.command(name="mute", description="Timeout a server member")
 @app_commands.checks.has_permissions(moderate_members=True)
 async def mute(interaction: discord.Interaction, user: discord.Member, time: str, reason: Optional[str] = "None"):
-    """手動禁言指令 - 渲染截圖 4 上方的綠條 Embed 樣式"""
+    """手動禁言指令 - 綠條 Embed"""
     delta, err = parse_mute_duration(time)
     if err: return await interaction.response.send_message(err, ephemeral=True)
     await user.timeout(delta, reason=reason)
@@ -271,7 +442,7 @@ async def mute(interaction: discord.Interaction, user: discord.Member, time: str
 @bot.tree.command(name="unmute", description="Remove timeout from a member")
 @app_commands.checks.has_permissions(moderate_members=True)
 async def unmute(interaction: discord.Interaction, user: discord.Member):
-    """手動解除禁言指令 - 渲染截圖 4 下方的綠條 Embed 樣式"""
+    """手動解除禁言指令 - 綠條 Embed"""
     await user.timeout(None)
     
     embed = discord.Embed(
@@ -285,7 +456,7 @@ async def unmute(interaction: discord.Interaction, user: discord.Member):
 @bot.tree.command(name="kick", description="Kick a member from server")
 @app_commands.checks.has_permissions(kick_members=True)
 async def kick(interaction: discord.Interaction, user: discord.Member, reason: Optional[str] = "None"):
-    """手動踢出指令 - 同步採用內嵌 Embed 高級排版樣式"""
+    """手動踢出指令 - 紅條 Embed"""
     await user.kick(reason=reason)
     
     embed = discord.Embed(
@@ -341,7 +512,7 @@ async def on_ready():
 
 @bot.event
 async def on_member_join(member: discord.Member):
-    """成員加入事件"""
+    """成員加入事件 - 動態採用使用者圖片身分組主色"""
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
     cursor.execute("SELECT channel_id, w_title, w_desc FROM welcome WHERE guild_id = ?", (str(member.guild.id),))
     row = cursor.fetchone(); conn.close()
@@ -350,7 +521,10 @@ async def on_member_join(member: discord.Member):
         if channel:
             title = parse_placeholders(row[1] or "Welcome!", member, member.guild)
             desc = parse_placeholders(row[2], member, member.guild)
-            embed = discord.Embed(title=title, description=desc, color=0x54a7dd)
+            
+            # 使用 member.color 動態計算身分組/頭像主色 (若為默認黑則設為精美藍)
+            embed_color = member.color if member.color.value != 0 else 0x54a7dd
+            embed = discord.Embed(title=title, description=desc, color=embed_color)
             embed.set_thumbnail(url=member.display_avatar.url)
             await channel.send(content=member.mention, embed=embed)
 
@@ -359,12 +533,11 @@ async def on_message(message: discord.Message):
     """訊息過濾與經驗值計算事件"""
     if message.author.bot or not message.guild: return
 
-    # 🎰 67 大標題偵測 (自動過濾掉 ID 標籤防止誤觸)
     cleaned = re.sub(r'<@&?\d+>|<#\d+>|<@!\d+>', '', message.content)
     if "67" in cleaned or "6️⃣7️⃣" in cleaned:
         await message.reply("# 67!!!!!")
 
-    # 自動 Mute 敏感詞庫執行 - 渲染截圖 3 的紅色 "HAHAHA 😂" 警告條樣式
+    # 自動 Mute 敏感詞庫過濾 - 紅條 HAHAHA 😂 警告樣式
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
     cursor.execute("SELECT banned_word, duration_str FROM mutes WHERE guild_id = ?", (str(message.guild.id),))
     banned_list = cursor.fetchall()
