@@ -131,11 +131,9 @@ class ManualMsgModal(ui.Modal, title="Send Manual Message"):
 
 
 class WelcomeGoodbyeModal(ui.Modal, title="Set Welcome Message"):
-    """符合 Discord API 45 字元標籤硬限制且具備自動記憶功能的彈出視窗"""
     def __init__(self, cid: str = None, w_t: str = None, w_d: str = None, g_t: str = None, g_d: str = None):
         super().__init__()
         
-        # 所有欄位的 label 嚴格限制在 45 個字元內，防止觸發 400 Bad Request 錯誤
         self.channel = ui.TextInput(
             label="Select Channel *",
             default=cid if cid else "Channel 1",
@@ -400,7 +398,6 @@ class SettingsView(ui.View):
     
     @ui.button(label="Welcome/Goodbye Panel", style=discord.ButtonStyle.secondary, emoji="👋")
     async def btn_w(self, interaction: discord.Interaction, btn: ui.Button):
-        # 💡 正統大型表單機器人做法：在這裡提供最完整的函數提示註解說明書（支援到 4000 字，安全且清晰）
         embed = discord.Embed(
             title="👋 Welcome & Goodbye Settings", 
             color=0x54a7dd, 
@@ -532,7 +529,32 @@ async def on_member_join(member: discord.Member):
         if channel:
             title = parse_placeholders(row[1] or "Welcome!", member, member.guild)
             desc = parse_placeholders(row[2], member, member.guild)
-            embed_color = member.color if member.color.value != 0 else 0x54a7dd
+            
+            # 🔮 核心復活：動態提取使用者頭像的「1x1平均主色調」
+            embed_color = discord.Color(0x54a7dd) # 預設安全色
+            try:
+                from PIL import Image
+                import io
+                # 讀取使用者大頭貼二進位資料
+                avatar_bytes = await member.display_avatar.with_format("png").read()
+                img = Image.open(io.BytesIO(avatar_bytes))
+                # 壓縮成 1x1 像素，強行逼出主色調
+                img = img.resize((1, 1))
+                rgb = img.getpixel((0, 0))
+                embed_color = discord.Color.from_rgb(rgb[0], rgb[1], rgb[2])
+            except Exception:
+                # 備援方案 1：如果大頭貼出問題，嘗試去撈 Discord 個人檔案主題色 (Accent Color)
+                try:
+                    fetched_user = await bot.fetch_user(member.id)
+                    if fetched_user.accent_color:
+                        embed_color = fetched_user.accent_color
+                    elif member.color.value != 0:
+                        embed_color = member.color
+                except:
+                    # 備援方案 2：撈取身分組最高顏色
+                    if member.color.value != 0:
+                        embed_color = member.color
+
             embed = discord.Embed(title=title, description=desc, color=embed_color)
             embed.set_thumbnail(url=member.display_avatar.url)
             await channel.send(content=member.mention, embed=embed)
