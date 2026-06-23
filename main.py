@@ -7,14 +7,11 @@ import os
 import random
 import re
 import sqlite3
-import io
-from PIL import Image
 from typing import Optional
 
 # =================================================================
 # ⚙️ 1. GLOBAL BOT CONFIGURATIONS (全局設定)
 # =================================================================
-# 機器人狀態循環清單
 WATCHING_STATUSES = [
     "67",
     "/settings",
@@ -22,7 +19,6 @@ WATCHING_STATUSES = [
     "24/7 Auto Mute"
 ]
 
-# 資料庫路徑 (支援 Railway 檔案系統備份)
 DB_PATH = os.getenv("DATABASE_PATH", "data/bot.db")
 if os.path.dirname(DB_PATH):
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -37,7 +33,7 @@ def init_db():
     """初始化 SQLite 所有功能資料表"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # 歡迎與告別字卡設定表 (擴充至 4 個欄位)
+    # 歡迎與告別設定表
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS welcome (
             guild_id TEXT PRIMARY KEY, channel_id TEXT, 
@@ -81,9 +77,9 @@ def parse_placeholders(text: str, member: discord.Member, guild: discord.Guild, 
     return text
 
 def parse_mute_duration(duration_str: str):
-    """解析禁言時間格式 (例如 1m, 2h, 1d)"""
+    """解析禁言時間格式 (例如 1m, 3m, 1h, 2d)"""
     match = re.match(r"^(\d+)([mhd])$", duration_str.strip().lower())
-    if not match: return None, "Invalid format! Use 1m, 3h, or 1d."
+    if not match: return None, "Invalid format! Use 1m, 3m, 1h, or 2d."
     amount, unit = int(match.group(1)), match.group(2)
     if unit == 'm': delta = datetime.timedelta(minutes=amount)
     elif unit == 'h': delta = datetime.timedelta(hours=amount)
@@ -136,7 +132,6 @@ bot = SixSevenBot()
 # 🖥️ 5. INTERACTIVE UI (MODALS & VIEWS - 全英文介面)
 # =================================================================
 
-# --- 歡迎與告別設定視窗 (4 欄位) ---
 class WelcomeGoodbyeModal(ui.Modal, title="Set Welcome Message"):
     w_title = ui.TextInput(label="Enter Embed Title of Welcome message", placeholder="Hey, welcome to {guild.name}!!!", required=False)
     w_desc = ui.TextInput(label="Enter Embed Description of Welcome message *", placeholder="You are the {member.count} member!", required=True, style=discord.TextStyle.long)
@@ -144,14 +139,11 @@ class WelcomeGoodbyeModal(ui.Modal, title="Set Welcome Message"):
     g_desc = ui.TextInput(label="Enter Embed Description of Goodbye message *", placeholder="Why u leave us?", required=True, style=discord.TextStyle.long)
 
     async def on_submit(self, interaction: discord.Interaction):
-        # 存入資料庫
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
         cursor.execute("INSERT OR REPLACE INTO welcome VALUES (?, ?, ?, ?, ?, ?)", 
                        (str(interaction.guild_id), str(interaction.channel_id), self.w_title.value, self.w_desc.value, self.g_title.value, self.g_desc.value))
         conn.commit(); conn.close()
 
-        # 生成預覽 Embed (解析變數)
         w_t = parse_placeholders(self.w_title.value or self.w_title.placeholder, interaction.user, interaction.guild, interaction.user)
         w_d = parse_placeholders(self.w_desc.value, interaction.user, interaction.guild, interaction.user)
         
@@ -159,7 +151,6 @@ class WelcomeGoodbyeModal(ui.Modal, title="Set Welcome Message"):
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
         await interaction.response.send_message(content="✅ **Settings Saved!** Here is your preview:", embed=embed, ephemeral=True)
 
-# --- 等級訊息設定視窗 ---
 class LevelMessageModal(ui.Modal, title="Set Level Up Message"):
     level_msg = ui.TextInput(label="Enter Level Up Message *", placeholder="Congrats {user.mention}! Level {level}!", required=True, style=discord.TextStyle.long)
 
@@ -173,7 +164,6 @@ class LevelMessageModal(ui.Modal, title="Set Level Up Message"):
         preview = parse_placeholders(self.level_msg.value, interaction.user, interaction.guild, extra={"level": "5"})
         await interaction.response.send_message(f"✅ **Message Saved!** Preview: {preview}", ephemeral=True)
 
-# --- 等級子選單面板 ---
 class LevelSettingsView(ui.View):
     def __init__(self): super().__init__(timeout=180)
     @ui.select(cls=ui.ChannelSelect, channel_types=[discord.ChannelType.text], placeholder="Select Level Up Channel 📢")
@@ -190,7 +180,6 @@ class LevelSettingsView(ui.View):
     async def mod_text(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(LevelMessageModal())
 
-# --- 自動禁言 Modal ---
 class AutoMuteModal(ui.Modal, title="Add Banned Word"):
     word = ui.TextInput(label="Enter Banned Word", required=True)
     time = ui.TextInput(label="Mute Duration (e.g., 10m, 1h)", default="10m", required=True)
@@ -201,7 +190,6 @@ class AutoMuteModal(ui.Modal, title="Add Banned Word"):
         conn.commit(); conn.close()
         await interaction.response.send_message(f"🔒 Banned word `{self.word.value}` added.", ephemeral=True)
 
-# --- 定時廣播 Modal ---
 class AnnouncementModal(ui.Modal, title="Add Time Message"):
     t_time = ui.TextInput(label="Time (HH:MM)", placeholder="08:00", max_length=5, required=True)
     msg = ui.TextInput(label="Message Content", style=discord.TextStyle.paragraph, required=True)
@@ -212,12 +200,11 @@ class AnnouncementModal(ui.Modal, title="Add Time Message"):
         conn.commit(); conn.close()
         await interaction.response.send_message(f"⏰ Announcement set at {self.t_time.value}", ephemeral=True)
 
-# --- 🌟 主控制面板 View ---
 class SettingsView(ui.View):
     def __init__(self): super().__init__(timeout=None)
     @ui.button(label="Welcome/Goodbye Panel", style=discord.ButtonStyle.secondary, emoji="👋")
     async def btn_w(self, interaction: discord.Interaction, btn: ui.Button):
-        await interaction.response.send_modal(WelcomeGoodbyeModal(interaction.channel))
+        await interaction.response.send_modal(WelcomeGoodbyeModal())
     @ui.button(label="Level System", style=discord.ButtonStyle.secondary, emoji="🎉")
     async def btn_l(self, interaction: discord.Interaction, btn: ui.Button):
         await interaction.response.send_message("📈 **Level System Configuration**", view=LevelSettingsView(), ephemeral=True)
@@ -229,9 +216,19 @@ class SettingsView(ui.View):
         await interaction.response.send_modal(AnnouncementModal())
 
 # =================================================================
-# 🚀 6. SLASH COMMANDS (全 9 個指令)
+# 🚀 6. SLASH COMMANDS (全 9 個指令 - 嚴格遵照指定順序)
 # =================================================================
 
+# --- 1. /help ---
+@bot.tree.command(name="help", description="Show help menu")
+async def help_cmd(interaction: discord.Interaction):
+    """幫助選單指令"""
+    embed = discord.Embed(title="Bot Help Menu", color=discord.Color.gold())
+    embed.add_field(name="Admin Commands", value="`/settings`, `/mute`, `/unmute`, `/kick`, `/setlevel`, `/manualmsg`")
+    embed.add_field(name="User Commands", value="`/level`, `/random67`, `/help`")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# --- 2. /settings ---
 @bot.tree.command(name="settings", description="Open bot configuration hub")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def settings(interaction: discord.Interaction):
@@ -239,48 +236,54 @@ async def settings(interaction: discord.Interaction):
     embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nAuto Mute\nTime Message")
     await interaction.response.send_message(embed=embed, view=SettingsView())
 
+# --- 3. /manualmsg ---
 @bot.tree.command(name="manualmsg", description="Send manual text message as bot")
 async def manualmsg(interaction: discord.Interaction, text: str):
     """手動發送訊息指令"""
     await interaction.channel.send(text)
     await interaction.response.send_message("✅ Message sent.", ephemeral=True)
 
-@bot.tree.command(name="setlevel", description="Manually set a member's level")
-@app_commands.checks.has_permissions(administrator=True)
-async def setlevel(interaction: discord.Interaction, member: discord.Member, lv: int):
-    """強制設定等級指令"""
-    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO levels (user_id, chars, level) VALUES (?, ?, ?)", (str(member.id), (lv-1)*150, lv))
-    conn.commit(); conn.close()
-    await interaction.response.send_message(f"✅ Set {member.name} to Lv. {lv}", ephemeral=True)
-
+# --- 4. /mute ---
 @bot.tree.command(name="mute", description="Timeout a server member")
 @app_commands.checks.has_permissions(moderate_members=True)
-async def mute(interaction: discord.Interaction, member: discord.Member, time: str, reason: str = "None"):
+async def mute(interaction: discord.Interaction, user: discord.Member, time: str, reason: Optional[str] = "None"):
     """手動禁言指令"""
     delta, err = parse_mute_duration(time)
     if err: return await interaction.response.send_message(err, ephemeral=True)
-    await member.timeout(delta, reason=reason)
-    await interaction.response.send_message(f"✅ Muted {member.name} for {time}.")
+    await user.timeout(delta, reason=reason)
+    await interaction.response.send_message(f"✅ Muted {user.name} for {time}. Reason: {reason}")
 
+# --- 5. /unmute ---
 @bot.tree.command(name="unmute", description="Remove timeout from a member")
 @app_commands.checks.has_permissions(moderate_members=True)
-async def unmute(interaction: discord.Interaction, member: discord.Member):
+async def unmute(interaction: discord.Interaction, user: discord.Member):
     """手動解除禁言指令"""
-    await member.timeout(None)
-    await interaction.response.send_message(f"✅ Unmuted {member.name}.")
+    await user.timeout(None)
+    await interaction.response.send_message(f"✅ Unmuted {user.name}.")
 
+# --- 6. /kick ---
 @bot.tree.command(name="kick", description="Kick a member from server")
 @app_commands.checks.has_permissions(kick_members=True)
-async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = "None"):
+async def kick(interaction: discord.Interaction, user: discord.Member, reason: Optional[str] = "None"):
     """手動踢出指令"""
-    await member.kick(reason=reason)
-    await interaction.response.send_message(f"✅ Kicked {member.name}.")
+    await user.kick(reason=reason)
+    await interaction.response.send_message(f"✅ Kicked {user.name}. Reason: {reason}")
 
+# --- 7. /setlevel ---
+@bot.tree.command(name="setlevel", description="Manually set a member's level")
+@app_commands.checks.has_permissions(administrator=True)
+async def setlevel(interaction: discord.Interaction, user: discord.Member, level: int):
+    """強制設定等級指令"""
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO levels (user_id, chars, level) VALUES (?, ?, ?)", (str(user.id), (level-1)*150, level))
+    conn.commit(); conn.close()
+    await interaction.response.send_message(f"✅ Set {user.name} to Level {level}", ephemeral=True)
+
+# --- 8. /level ---
 @bot.tree.command(name="level", description="Check current activity stats")
-async def level(interaction: discord.Interaction, member: discord.Member = None):
+async def level(interaction: discord.Interaction, user: Optional[discord.Member] = None):
     """查詢等級指令"""
-    target = member or interaction.user
+    target = user or interaction.user
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
     cursor.execute("SELECT chars, level FROM levels WHERE user_id = ?", (str(target.id),))
     row = cursor.fetchone(); conn.close()
@@ -290,19 +293,12 @@ async def level(interaction: discord.Interaction, member: discord.Member = None)
     embed.add_field(name="Words", value=f"{chars}")
     await interaction.response.send_message(embed=embed)
 
+# --- 9. /random67 ---
 @bot.tree.command(name="random67", description="Get lucky 67 message")
 async def random67(interaction: discord.Interaction):
     """娛樂隨機 67 指令"""
     jokes = ["67 is magic!", "Luck factor: 67", "Spirit of Six Seven!"]
     await interaction.response.send_message(random.choice(jokes))
-
-@bot.tree.command(name="help", description="Show help menu")
-async def help_cmd(interaction: discord.Interaction):
-    """幫助選單指令"""
-    embed = discord.Embed(title="Bot Help Menu", color=discord.Color.gold())
-    embed.add_field(name="Admin", value="`/settings`, `/mute`, `/unmute`, `/kick`, `/setlevel`, `/manualmsg`")
-    embed.add_field(name="User", value="`/level`, `/random67`, `/help`")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # =================================================================
 # ⚡ 7. SYSTEM EVENTS (核心監聽事件)
@@ -336,14 +332,26 @@ async def on_message(message: discord.Message):
     """訊息過濾與經驗值計算事件"""
     if message.author.bot or not message.guild: return
 
-    # 🎰 67 大標題偵測 (過濾標記 ID)
+    # 🎰 67 大標題偵測 (自動過濾掉 ID 標籤防止誤觸)
     cleaned = re.sub(r'<@&?\d+>|<#\d+>|<@!\d+>', '', message.content)
     if "67" in cleaned or "6️⃣7️⃣" in cleaned:
         await message.reply("# 67!!!!!")
 
-    # 經驗值結算
-    uid = str(message.author.id)
+    # 自動 Mute 敏感詞庫執行
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("SELECT banned_word, duration_str FROM mutes WHERE guild_id = ?", (str(message.guild.id),))
+    banned_list = cursor.fetchall()
+    for word, dur in banned_list:
+        if word in message.content:
+            try:
+                await message.delete()
+                delta, _ = parse_mute_duration(dur)
+                await message.author.timeout(delta or datetime.timedelta(minutes=10), reason="Auto Mute Triggered")
+                return
+            except: pass
+
+    # 經驗值結算邏輯 (每 150 字升一級)
+    uid = str(message.author.id)
     cursor.execute("SELECT chars, level FROM levels WHERE user_id = ?", (uid,))
     row = cursor.fetchone()
     chars, lvl = row if row else (0, 1)
@@ -355,12 +363,14 @@ async def on_message(message: discord.Message):
     if new_lvl > lvl:
         cursor.execute("SELECT channel_id, message FROM levelup WHERE guild_id = ?", (str(message.guild.id),))
         lrow = cursor.fetchone()
-        if lrow:
+        if lrow and lrow[0]:
             chan = bot.get_channel(int(lrow[0]))
             if chan:
                 txt = parse_placeholders(lrow[1], message.author, message.guild, extra={"level": new_lvl})
                 await chan.send(txt)
     conn.close()
 
-# 🔑 啟動機器人 (採用 os.getenv)
+# =================================================================
+# 🔑 8. RUN BOT (啟動端)
+# =================================================================
 bot.run(os.getenv("DISCORD_TOKEN"))
