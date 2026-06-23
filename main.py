@@ -716,8 +716,8 @@ async def on_message(message: discord.Message):
     # 支援一般數字 67 與 Discord 內建 Unicode 數字鍵帽代碼 6️⃣7️⃣
     if "67" in message.content or "6️⃣7️⃣" in message.content:
         lucky_responses = [
-            f"{message.author.mention}, 67!!!!!",
-            f"{message.author.mention}, six seven!!!!!"
+            f"# {message.author.mention}, 67!!!!!",
+            f"# {message.author.mention}, six seven!!!!!"
         ]
         try:
             # 使用 reply() 能自動附帶原訊息引用與通知
