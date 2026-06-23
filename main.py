@@ -131,40 +131,36 @@ class ManualMsgModal(ui.Modal, title="Send Manual Message"):
 
 
 class WelcomeGoodbyeModal(ui.Modal, title="Set Welcome Message"):
-    """動態載入記憶＋完美換行提示註解的進階 Modal"""
+    """符合 Discord API 45 字元標籤硬限制且具備自動記憶功能的彈出視窗"""
     def __init__(self, cid: str = None, w_t: str = None, w_d: str = None, g_t: str = None, g_d: str = None):
         super().__init__()
         
-        # 1. 頻道輸入格（若無歷史紀錄，預設顯示 Channel 1）
+        # 所有欄位的 label 嚴格限制在 45 個字元內，防止觸發 400 Bad Request 錯誤
         self.channel = ui.TextInput(
             label="Select Channel *",
             default=cid if cid else "Channel 1",
             required=True
         )
         
-        # 2. 歡迎標題輸入格（若無歷史紀錄，自動填入對應的預設參數）
         self.w_title = ui.TextInput(
             label="Enter Embed Title of Welcome message",
             default=w_t if w_t else "Hey, welcome to {guild.name}!!!",
             required=False
         )
         
-        # 3. 歡迎內文輸入格（運用換行技術，在上方的 Label 處渲染給使用者的提示小字）
         self.w_desc = ui.TextInput(
-            label="You can only use {user.username} {user.name} and {guild.name}\n\nEnter Embed Description of Welcome message *",
+            label="Enter Embed Description of Welcome message *",
             default=w_d if w_d else "You are the {member.count} member here!\nInviter: {inviter.name}",
             required=True,
             style=discord.TextStyle.long
         )
         
-        # 4. 告別標題輸入格（同樣利用 Label 換行，塞入長條的變數使用規則註解）
         self.g_title = ui.TextInput(
-            label="You can use {user.username} {user.name} {guild.name} {guild.membercount} {guild.members} {inviter}\n\nEnter Embed Title of Goodbye message",
+            label="Enter Embed Title of Goodbye message",
             default=g_t if g_t else "{user.name} has leave the server",
             required=False
         )
         
-        # 5. 告別內文輸入格
         self.g_desc = ui.TextInput(
             label="Enter Embed Description of Goodbye message *",
             default=g_d if g_d else "Whyyyyyy u leave us?????",
@@ -172,7 +168,6 @@ class WelcomeGoodbyeModal(ui.Modal, title="Set Welcome Message"):
             style=discord.TextStyle.long
         )
 
-        # 依序將動態生成的物件加入視窗
         self.add_item(self.channel)
         self.add_item(self.w_title)
         self.add_item(self.w_desc)
@@ -180,7 +175,6 @@ class WelcomeGoodbyeModal(ui.Modal, title="Set Welcome Message"):
         self.add_item(self.g_desc)
 
     async def on_submit(self, interaction: discord.Interaction):
-        # 將使用者填寫或修改後的全新內容直接覆蓋存入資料庫
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("INSERT OR REPLACE INTO welcome VALUES (?, ?, ?, ?, ?, ?)", 
@@ -214,7 +208,6 @@ class WelcomeConfigView(ui.View):
 
     @ui.button(label="📝 Edit Cards (Modal)", style=discord.ButtonStyle.primary)
     async def edit_msg(self, interaction: discord.Interaction, button: ui.Button):
-        # 【關鍵修復】點擊按鈕時，先去資料庫撈取上一次儲存的舊設定
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("SELECT channel_id, w_title, w_desc, g_title, g_desc FROM welcome WHERE guild_id = ?", (str(interaction.guild_id),))
@@ -222,10 +215,8 @@ class WelcomeConfigView(ui.View):
         conn.close()
 
         if row:
-            # 如果有歷史資料，直接當作參數送進去 Modal 進行預填載入
             await interaction.response.send_modal(WelcomeGoodbyeModal(row[0], row[1], row[2], row[3], row[4]))
         else:
-            # 如果資料庫是空的，直接開啟並自動套用內部的 Default 預設值
             await interaction.response.send_modal(WelcomeGoodbyeModal())
 
     @ui.button(label="❌ Disable / Reset Panel", style=discord.ButtonStyle.danger)
@@ -409,7 +400,21 @@ class SettingsView(ui.View):
     
     @ui.button(label="Welcome/Goodbye Panel", style=discord.ButtonStyle.secondary, emoji="👋")
     async def btn_w(self, interaction: discord.Interaction, btn: ui.Button):
-        embed = discord.Embed(title="👋 Welcome & Goodbye Settings", color=0x54a7dd, description="Configure channel routing and text cards below.")
+        # 💡 正統大型表單機器人做法：在這裡提供最完整的函數提示註解說明書（支援到 4000 字，安全且清晰）
+        embed = discord.Embed(
+            title="👋 Welcome & Goodbye Settings", 
+            color=0x54a7dd, 
+            description=(
+                "請先在下方下拉選單選擇發送頻道，再點擊按鈕編輯自訂卡片內容。\n\n"
+                "**📌 支援的動態參數註解（填寫時系統會自動替換）：**\n"
+                "• `{user.name}` / `{user.username}` - 顯示成員名稱\n"
+                "• `{user.mention}` - 標記（Mention）該進群成員\n"
+                "• `{guild.name}` / `{server.name}` - 顯示當前伺服器名稱\n"
+                "• `{member.count}` / `{guild.members}` / `{guild.membercount}` - 總人數\n"
+                "• `{inviter.name}` / `{inviter}` - 邀請人名稱 / 邀請人標記\n\n"
+                "*提示：若資料庫內無歷史記錄，編輯視窗將自動載入內建的預設樣式文字。*"
+            )
+        )
         await interaction.response.edit_message(embed=embed, view=WelcomeConfigView())
         
     @ui.button(label="Level System", style=discord.ButtonStyle.secondary, emoji="🎉")
