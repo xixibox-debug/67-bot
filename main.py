@@ -20,8 +20,10 @@ WATCHING_STATUSES = [
     "24/7 Auto Mute"
 ]
 
-os.makedirs("data", exist_ok=True)
-DB_PATH = "data/bot.db"
+# 備份防歸零優化：優先讀取雲端平台的持久化空間路徑，若無則使用本地 data/bot.db
+DB_PATH = os.getenv("DATABASE_PATH", "data/bot.db")
+if os.path.dirname(DB_PATH):
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -82,7 +84,7 @@ def init_db():
     
     conn.commit()
     conn.close()
-    print("✨ [Database] All functional database tables checked and initialized.")
+    print(f"✨ [Database] Database initialized safely at: {DB_PATH}")
 
 init_db()
 
@@ -130,11 +132,9 @@ class SixSevenBot(commands.Bot):
     # --- ⏰ LOOP 2: 精準防漏報時監聽器 (每 30 秒高頻精準對時) ---
     @tasks.loop(seconds=30)
     async def check_time_announcements(self):
-        # 使用台灣時間時區 (UTC+8)
         tz_tw = datetime.timezone(datetime.timedelta(hours=8))
         now_tw = datetime.datetime.now(tz_tw).strftime("%H:%M")
         
-        # 如果這一分鐘已經成功報時過，直接跳過防重複觸發
         if now_tw == self.last_announced_minute:
             return
             
@@ -145,7 +145,7 @@ class SixSevenBot(commands.Bot):
         conn.close()
         
         if rows:
-            self.last_announced_minute = now_tw  # 記錄當前已發送的分鐘
+            self.last_announced_minute = now_tw  
             for channel_id, message in rows:
                 channel = self.get_channel(int(channel_id))
                 if channel:
@@ -190,7 +190,6 @@ async def on_guild_remove(guild):
 # 🛠️ 4.5 TIME PARSER HELPER FOR MUTE COMMAND
 # =================================================================
 def parse_mute_duration(duration_str: str):
-    """解析時間字串，如 1m, 3m, 1h, 1d 等，最高限制 14d"""
     match = re.match(r"^(\d+)([mhd])$", duration_str.strip().lower())
     if not match:
         return None, "❌ 時間格式錯誤！請使用基本格式如 `1m` (分), `3h` (小時), `1d` (天)。"
@@ -217,7 +216,6 @@ def parse_mute_duration(duration_str: str):
 # =================================================================
 
 class ManualMsgModal(discord.ui.Modal, title="發送純文字訊息"):
-    # 修正：縮短 Label 字數以防極限過長
     msg_input = discord.ui.TextInput(
         label="請輸入要廣播的訊息內容", 
         style=discord.TextStyle.paragraph,
@@ -231,12 +229,10 @@ class ManualMsgModal(discord.ui.Modal, title="發送純文字訊息"):
 
 
 class WelcomeModal(discord.ui.Modal):
-    """/setwelcome 專用彈出式視窗：儲存後直接在悄悄話下方塞入完全模擬的測試卡片"""
     def __init__(self, channel: discord.TextChannel):
         super().__init__(title="設定伺服器歡迎訊息")
         self.channel = channel
         
-    # 修正：原字串 46 字元爆上限，現改為簡潔中文（嚴格限制在 45 字元內）
     msg_input = discord.ui.TextInput(
         label="歡迎訊息內文 (可使用下方支援變數)",
         style=discord.TextStyle.paragraph,
@@ -307,7 +303,6 @@ class LevelUpModal(discord.ui.Modal):
         super().__init__(title="設定自訂升級通知")
         self.channel = channel
         
-    # 修正：原字串 63 字元嚴重超標，現改為精簡中文標籤
     msg_input = discord.ui.TextInput(
         label="通知內文 (支援 {user.mention} 與 {user.level})",
         style=discord.TextStyle.paragraph,
@@ -713,8 +708,22 @@ async def on_member_join(member: discord.Member):
 
 @bot.event
 async def on_message(message: discord.Message):
+    # 🛑 安全防禦第一關：不回應任何機器人（包括自己），嚴防死循環
     if message.author.bot or not message.guild:
         return
+
+    # 🎰 新功能：24/7 全天候 67 核心魔術字隨機「回覆」偵測
+    # 支援一般數字 67 與 Discord 內建 Unicode 數字鍵帽代碼 6️⃣7️⃣
+    if "67" in message.content or "6️⃣7️⃣" in message.content:
+        lucky_responses = [
+            f"{message.author.mention}, 67!!!!!",
+            f"{message.author.mention}, six seven!!!!!"
+        ]
+        try:
+            # 使用 reply() 能自動附帶原訊息引用與通知
+            await message.reply(content=random.choice(lucky_responses))
+        except Exception as err:
+            print(f"⚠️ [67 Reply System] Auto-reply triggered an error: {err}")
 
     guild_id_str = str(message.guild.id)
     
