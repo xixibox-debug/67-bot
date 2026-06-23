@@ -185,6 +185,7 @@ class WelcomeGoodbyeModal(ui.Modal, title="Set Welcome Message"):
         
         embed = discord.Embed(title=w_t, description=w_d, color=interaction.user.color)
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.send_message(content="✅ **Embed Text Content Saved!** Preview:", embed=embed, ephemeral=True)
 
 
@@ -227,6 +228,7 @@ class WelcomeConfigView(ui.View):
     @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
         embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nAuto Mute\nTime Message")
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=SettingsView())
 
 
@@ -321,6 +323,7 @@ class AutoMuteConfigView(ui.View):
     @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=0)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
         embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nAuto Mute\nTime Message")
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=SettingsView())
 
 
@@ -390,6 +393,7 @@ class TimeMessageConfigView(ui.View):
     @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=0)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
         embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nAuto Mute\nTime Message")
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=SettingsView())
 
 
@@ -412,6 +416,7 @@ class SettingsView(ui.View):
                 "*提示：若資料庫內無歷史記錄，編輯視窗將自動載入內建的預設樣式文字。*"
             )
         )
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=WelcomeConfigView())
         
     @ui.button(label="Level System", style=discord.ButtonStyle.secondary, emoji="🎉")
@@ -421,11 +426,13 @@ class SettingsView(ui.View):
     @ui.button(label="Auto Mute", style=discord.ButtonStyle.secondary, emoji="🔒")
     async def btn_a(self, interaction: discord.Interaction, btn: ui.Button):
         embed = discord.Embed(title="🔒 Auto Mute Filter Config Hub", color=0xff0000, description="Create text filtering parameters or remove existing configurations below.")
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=AutoMuteConfigView(interaction.guild_id))
         
     @ui.button(label="Time Message", style=discord.ButtonStyle.secondary, emoji="⏰")
     async def btn_t(self, interaction: discord.Interaction, btn: ui.Button):
         embed = discord.Embed(title="⏰ Time Message Alerts Hub", color=0x3498db, description="Schedule timed standard text warnings or clear past records below.")
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=TimeMessageConfigView(interaction.guild_id))
 
 # =================================================================
@@ -437,12 +444,14 @@ async def help_cmd(interaction: discord.Interaction):
     embed = discord.Embed(title="Bot Help Menu", color=discord.Color.gold())
     embed.add_field(name="Admin Commands", value="`/settings`, `/mute`, `/unmute`, `/kick`, `/setlevel`, `/manualmsg`")
     embed.add_field(name="User Commands", value="`/level`, `/random67`, `/help`")
+    embed.set_footer(text=f"{interaction.guild.name}｜67" if interaction.guild else "67")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="settings", description="Open bot configuration hub")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def settings(interaction: discord.Interaction):
     embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nAuto Mute\nTime Message")
+    embed.set_footer(text=f"{interaction.guild.name}｜67")
     await interaction.response.send_message(embed=embed, view=SettingsView())
 
 @bot.tree.command(name="manualmsg", description="Send manual text message as bot")
@@ -460,7 +469,7 @@ async def mute(interaction: discord.Interaction, user: discord.Member, time: str
         color=0x2ecc71,
         description=parse_placeholders("Time: {mute time}\nReason: {reason}", user, interaction.guild, extra={"mute time": time, "reason": reason})
     )
-    embed.set_footer(text=parse_placeholders("{server.name} | 67", user, interaction.guild))
+    embed.set_footer(text=f"{interaction.guild.name}｜67")
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="unmute", description="Remove timeout from a member")
@@ -468,7 +477,7 @@ async def mute(interaction: discord.Interaction, user: discord.Member, time: str
 async def unmute(interaction: discord.Interaction, user: discord.Member):
     await user.timeout(None)
     embed = discord.Embed(title=parse_placeholders("✅ {user.name} has been unmuted.", user, interaction.guild), color=0x2ecc71)
-    embed.set_footer(text=parse_placeholders("{server.name} | 67", user, interaction.guild))
+    embed.set_footer(text=f"{interaction.guild.name}｜67")
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="kick", description="Kick a member from server")
@@ -480,7 +489,7 @@ async def kick(interaction: discord.Interaction, user: discord.Member, reason: O
         color=0xe74c3c,
         description=parse_placeholders("Reason: {reason}", user, interaction.guild, extra={"reason": reason})
     )
-    embed.set_footer(text=parse_placeholders("{server.name} | 67", user, interaction.guild))
+    embed.set_footer(text=f"{interaction.guild.name}｜67")
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="setlevel", description="Manually set a member's level")
@@ -501,6 +510,7 @@ async def level(interaction: discord.Interaction, user: Optional[discord.Member]
     embed = discord.Embed(title=f"Activity for {target.name}", color=0x2ecc71)
     embed.add_field(name="Level", value=f"Lv. {lvl}")
     embed.add_field(name="Words", value=f"{chars}")
+    embed.set_footer(text=f"{interaction.guild.name}｜67" if interaction.guild else "67")
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="random67", description="Get lucky 67 message")
@@ -530,20 +540,16 @@ async def on_member_join(member: discord.Member):
             title = parse_placeholders(row[1] or "Welcome!", member, member.guild)
             desc = parse_placeholders(row[2], member, member.guild)
             
-            # 🔮 核心復活：動態提取使用者頭像的「1x1平均主色調」
-            embed_color = discord.Color(0x54a7dd) # 預設安全色
+            embed_color = discord.Color(0x54a7dd)
             try:
                 from PIL import Image
                 import io
-                # 讀取使用者大頭貼二進位資料
                 avatar_bytes = await member.display_avatar.with_format("png").read()
                 img = Image.open(io.BytesIO(avatar_bytes))
-                # 壓縮成 1x1 像素，強行逼出主色調
                 img = img.resize((1, 1))
                 rgb = img.getpixel((0, 0))
                 embed_color = discord.Color.from_rgb(rgb[0], rgb[1], rgb[2])
             except Exception:
-                # 備援方案 1：如果大頭貼出問題，嘗試去撈 Discord 個人檔案主題色 (Accent Color)
                 try:
                     fetched_user = await bot.fetch_user(member.id)
                     if fetched_user.accent_color:
@@ -551,13 +557,43 @@ async def on_member_join(member: discord.Member):
                     elif member.color.value != 0:
                         embed_color = member.color
                 except:
-                    # 備援方案 2：撈取身分組最高顏色
                     if member.color.value != 0:
                         embed_color = member.color
 
             embed = discord.Embed(title=title, description=desc, color=embed_color)
             embed.set_thumbnail(url=member.display_avatar.url)
+            embed.set_footer(text=f"{member.guild.name}｜67")
             await channel.send(content=member.mention, embed=embed)
+
+@bot.event
+async def on_member_remove(member: discord.Member):
+    """補回原本漏掉的退出伺服器監聽器，精準抓取退出卡片設定與頭像色調"""
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("SELECT channel_id, g_title, g_desc FROM welcome WHERE guild_id = ?", (str(member.guild.id),))
+    row = cursor.fetchone(); conn.close()
+    if row and row[0]:
+        channel = bot.get_channel(int(row[0]))
+        if channel:
+            title = parse_placeholders(row[1] or "Goodbye!", member, member.guild)
+            desc = parse_placeholders(row[2], member, member.guild)
+            
+            embed_color = discord.Color(0xe74c3c) # 預設退出微紅色
+            try:
+                from PIL import Image
+                import io
+                avatar_bytes = await member.display_avatar.with_format("png").read()
+                img = Image.open(io.BytesIO(avatar_bytes))
+                img = img.resize((1, 1))
+                rgb = img.getpixel((0, 0))
+                embed_color = discord.Color.from_rgb(rgb[0], rgb[1], rgb[2])
+            except Exception:
+                if member.color.value != 0:
+                    embed_color = member.color
+
+            embed = discord.Embed(title=title, description=desc, color=embed_color)
+            embed.set_thumbnail(url=member.display_avatar.url)
+            embed.set_footer(text=f"{member.guild.name}｜67")
+            await channel.send(embed=embed)
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -583,7 +619,7 @@ async def on_message(message: discord.Message):
                         message.author, message.guild, extra={"mute time": dur, "message": message.content}
                     )
                 )
-                embed.set_footer(text=parse_placeholders("{server.name} | 67", message.author, message.guild))
+                embed.set_footer(text=f"{message.guild.name}｜67")
                 await message.channel.send(embed=embed)
                 return
             except: pass
