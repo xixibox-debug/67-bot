@@ -493,7 +493,11 @@ async def level(interaction: discord.Interaction, user: Optional[discord.Member]
     row = cursor.fetchone()
     
     xp, lvl, count_67 = row if row else (0, 1, 0)
-    xp_needed = get_xp_needed(lvl)
+    is_admin = target.guild_permissions.administrator if isinstance(target, discord.Member) else False
+    xp_needed = get_xp_needed(lvl, is_admin)
+    
+    # 📈 高效率全服即時排名計算
+
     
     # 📈 高效率全服即時排名計算
     cursor.execute("SELECT COUNT(*) FROM levels WHERE level > ? OR (level = ? AND xp > ?)", (lvl, lvl, xp))
