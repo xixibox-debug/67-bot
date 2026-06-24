@@ -60,7 +60,15 @@ def init_db():
             last_rob INTEGER DEFAULT 0
         )
     """)
-    
+    # 🎯 新增：建立等級身分組獎勵配置表
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS level_roles (
+            guild_id TEXT,
+            level INTEGER,
+            role_id TEXT,
+            PRIMARY KEY (guild_id, level)
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -70,6 +78,20 @@ init_db()
 # 🔄 3. CORE UTILITIES (核心工具函式與變數解析)
 # =================================================================
 def get_xp_needed(level: int, is_admin: bool = False) -> int:
+async def check_level_roles(member: discord.Member, level: int):
+    """檢查並發放該等級對應的身分組獎勵"""
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("SELECT role_id FROM level_roles WHERE guild_id = ? AND level = ?", (str(member.guild.id), level))
+    row = cursor.fetchone()
+    conn.close()
+    
+    if row:
+        role = member.guild.get_role(int(row[0]))
+        if role and role not in member.roles:
+            try:
+                await member.add_roles(role)
+            except discord.Forbidden:
+                logger.error(f"[身分組發放失敗]: 權限不足，無法給予 {member.name} 身分組 {role.name}")
     if is_admin:
         return 150  # 管理員專屬：每一等都固定只要 150 XP
     return 5 * (level ** 2) + 50 * level + 100
@@ -241,10 +263,55 @@ class LevelSettingsView(ui.View):
         cursor.execute("INSERT OR REPLACE INTO levelup VALUES (?, ?, ?)", (str(interaction.guild_id), str(cid), msg))
         conn.commit(); conn.close()
         await interaction.response.send_message(f"✅ Level channel set to {select.values[0].mention}", ephemeral=True)
+        
+    @ui.button(label="🎭 設置等級身分組", style=discord.ButtonStyle.blurple, row=2)
+    async def go_level_role(self, interaction: discord.Interaction, button: ui.Button):
+        embed = discord.Embed(
+            title="🎭 等級身分組獎勵設定", 
+            description="請先在下方選單**選擇一個身分組**，隨後系統會彈出視窗請你輸入**指定的解鎖等級**。", 
+            color=0x2b2d31
+        )
+        await interaction.response.edit_message(embed=embed, view=LevelRoleSettingsView(self))
 
     @ui.button(label="Modify Level Message", style=discord.ButtonStyle.success)
     async def mod_text(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(LevelMessageModal())
+
+
+class LevelRoleModal(ui.Modal, title="設定等級身分組獎勵"):
+    level_input = ui.TextInput(label="達到幾等給予此身分組？", placeholder="例如：10", min_length=1, max_length=3)
+
+    def __init__(self, role: discord.Role, parent_view):
+        super().__init__()
+        self.role = role
+        self.parent_view = parent_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            lvl = int(self.level_input.value)
+            if lvl < 1: raise ValueError
+        except ValueError:
+            return await interaction.response.send_message("❌ 請輸入大於 0 的有效整數！", ephemeral=True)
+
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO level_roles (guild_id, level, role_id) VALUES (?, ?, ?)", 
+                       (str(interaction.guild.id), lvl, str(self.role.id)))
+        conn.commit(); conn.close()
+        await interaction.response.send_message(f"✅ 設定成功！成員達到 **Lv. {lvl}** 時將自動獲得 {self.role.mention}", ephemeral=True)
+
+class LevelRoleSettingsView(ui.View):
+    def __init__(self, original_view):
+        super().__init__(timeout=60)
+        self.original_view = original_view
+
+    @ui.select(cls=ui.RoleSelect, placeholder="請選擇要綁定的身分組...", min_values=1, max_values=1)
+    async def select_role(self, interaction: discord.Interaction, select: ui.RoleSelect):
+        await interaction.response.send_modal(LevelRoleModal(select.values[0], self))
+
+    @ui.button(label="⬅️ 返回等級設定", style=discord.ButtonStyle.gray)
+    async def back(self, interaction: discord.Interaction, button: ui.Button):
+        embed = discord.Embed(title="⚙️ Level System Configuration", description="請選擇你要調整的等級系統設定：", color=0x2b2d31)
+        await interaction.response.edit_message(embed=embed, view=self.original_view)
 
 
 class AutoMuteModal(ui.Modal, title="Add Banned Word"):
@@ -478,6 +545,8 @@ async def setlevel(interaction: discord.Interaction, user: discord.Member, level
     
     # 回應操作的管理員（僅限管理員看見）
     await interaction.response.send_message(f"✅ 已將 {user.name} 的等級調整為 Lv. {level}", ephemeral=True)
+    # 🎯 新增：手動調等後，自動補上對應等級的身分組獎勵
+    await check_level_roles(user, level)
     
     # 🎯 核心修正：直接抓取與一般升等完全相同的頻道與訊息設定
     cursor.execute("SELECT channel_id, message FROM levelup WHERE guild_id = ?", (str(interaction.guild.id),))
@@ -789,6 +858,28 @@ async def setbalance(interaction: discord.Interaction, user: discord.Member, val
     
     await interaction.response.send_message(f"💵 Successfully set {user.name}'s balance to **${value}**.", ephemeral=True)
 
+@bot.tree.command(name="addrole", description="Manually add a role to a user")
+@app_commands.checks.has_permissions(administrator=True)
+async def addrole(interaction: discord.Interaction, user: discord.Member, role: discord.Role):
+    if role in user.roles:
+        return await interaction.response.send_message(f"❌ {user.mention} 已經擁有 {role.name} 身分組了！", ephemeral=True)
+    try:
+        await user.add_roles(role)
+        await interaction.response.send_message(f"✅ 已成功將身分組 {role.mention} 給予 {user.mention}", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ 機器人權限不足！請確認機器人的最高身分組階層「高於」你想操作的身分組。", ephemeral=True)
+
+@bot.tree.command(name="removerole", description="Manually remove a role from a user")
+@app_commands.checks.has_permissions(administrator=True)
+async def removerole(interaction: discord.Interaction, user: discord.Member, role: discord.Role):
+    if role not in user.roles:
+        return await interaction.response.send_message(f"❌ {user.mention} 本來就沒有 {role.name} 身分組！", ephemeral=True)
+    try:
+        await user.remove_roles(role)
+        await interaction.response.send_message(f"✅ 已成功將 {user.mention} 的身分組 {role.mention} 移除", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ 機器人權限不足，無法移除該身分組！", ephemeral=True)
+
 # =================================================================
 # ⚡ 7. SYSTEM EVENTS
 # =================================================================
@@ -870,6 +961,53 @@ async def on_message(message: discord.Message):
         ]
         await message.reply(random.choice(annoyed_phrases))
         return  # 被標記後直接敷衍回覆並結束，防止連續觸發後續的 67 造成洗頻
+
+# =================================================================
+    # 📈 LEVEL SYSTEM & AUTO ROLE DISPATCHER
+    # =================================================================
+    uid = str(message.author.id)
+    gid = str(message.guild.id)
+    
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    # 取得使用者當前的經驗值與等級 (假設表名為 levels)
+    cursor.execute("CREATE TABLE IF NOT EXISTS levels (guild_id TEXT, user_id TEXT, xp INTEGER, level INTEGER, PRIMARY KEY (guild_id, user_id))")
+    cursor.execute("SELECT xp, level FROM levels WHERE guild_id = ? AND user_id = ?", (gid, uid))
+    row = cursor.fetchone()
+    
+    if row:
+        xp, lvl = row[0], row[1]
+    else:
+        xp, lvl = 0, 0
+
+    # 隨機增加 15 ~ 25 點經驗值
+    xp_gained = random.randint(15, 25)
+    new_xp = xp + xp_gained
+    new_lvl = lvl
+    
+    # 透過你原本定義的 get_xp_needed 函式計算是否升等
+    while new_xp >= get_xp_needed(new_lvl):
+        new_xp -= get_xp_needed(new_lvl)
+        new_lvl += 1
+        
+    # 🎯 核心功能：當等級發生變化時，依序補發身分組
+    if new_lvl > lvl:
+        for l in range(lvl + 1, new_lvl + 1):
+            await check_level_roles(message.author, l)
+            
+        # 讀取並發送你透過 /settings 設定的升等通知訊息
+        cursor.execute("SELECT channel_id, message FROM levelup WHERE guild_id = ?", (gid,))
+        lvl_row = cursor.fetchone()
+        if lvl_row:
+            channel = message.guild.get_channel(int(lvl_row[0]))
+            msg_template = lvl_row[1]
+            if channel:
+                # 替換通知內容中的變數
+                announce_msg = msg_template.replace("{level}", str(new_lvl)).replace("{user}", message.author.mention)
+                await channel.send(announce_msg)
+
+    # 將最新的經驗與等級數據同步回資料庫
+    cursor.execute("INSERT OR REPLACE INTO levels (guild_id, user_id, xp, level) VALUES (?, ?, ?, ?)", (gid, uid, new_xp, new_lvl))
+    conn.commit(); conn.close()
 
     # -------------------------------------------------------------
     # 原始邏輯：過濾標記並檢查 "67"
