@@ -447,21 +447,25 @@ async def kick_error(interaction: discord.Interaction, error: app_commands.AppCo
     if isinstance(error, app_commands.errors.MissingPermissions): await interaction.response.send_message("❌ 你沒有「踢出成員」的權限！", ephemeral=True)
 
 
-@bot.tree.command(name="setlevel", description="Manually set a member's level (supports upgrades & downgrades)")
+@@bot.tree.command(name="setlevel", description="Manually set a member's level")
 @app_commands.checks.has_permissions(administrator=True)
 async def setlevel(interaction: discord.Interaction, user: discord.Member, level: int):
     if level < 1: return await interaction.response.send_message("❌ 等級不能小於 1！", ephemeral=True)
     
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-    cursor.execute("SELECT level, count_67 FROM levels WHERE user_id = ?", (str(user.id),))
+    cursor.execute("SELECT count_67 FROM levels WHERE user_id = ?", (str(user.id),))
     row = cursor.fetchone()
-    old_lvl, current_67 = row if row else (1, 0)
+    current_67 = row[0] if row else 0
     
+    # 變更等級，並將目前 XP 歸零重算
     cursor.execute("INSERT OR REPLACE INTO levels (user_id, xp, level, count_67) VALUES (?, ?, ?, ?)", (str(user.id), 0, level, current_67))
     conn.commit()
+    
+    # 回應操作的管理員（僅限管理員看見）
     await interaction.response.send_message(f"✅ 已將 {user.name} 的等級調整為 Lv. {level}", ephemeral=True)
     
-    cursor.execute("SELECT channel_id FROM levelup WHERE guild_id = ?", (str(interaction.guild.id),))
+    # 🎯 核心修正：直接抓取與一般升等完全相同的頻道與訊息設定
+    cursor.execute("SELECT channel_id, message FROM levelup WHERE guild_id = ?", (str(interaction.guild.id),))
     lrow = cursor.fetchone()
     conn.close()
     
@@ -469,19 +473,12 @@ async def setlevel(interaction: discord.Interaction, user: discord.Member, level
         try:
             chan = bot.get_channel(int(lrow[0])) or await bot.fetch_channel(int(lrow[0]))
             if chan:
-                is_upgrade = level > old_lvl
-                title_text = "📈 **管理員手動灌水通知**" if is_upgrade else "📉 **管理員手動降級通知**"
-                embed_color = 0x2ecc71 if is_upgrade else 0xe74c3c
-                
-                embed = discord.Embed(
-                    title=title_text,
-                    description=f"管理員調整了 {user.mention} 的活動等級狀態：\n\n• 原本等級：`Lv. {old_lvl}`\n• 目前等級：`Lv. {level}`\n• 剩餘進度：`0 / {get_xp_needed(level)} XP`",
-                    color=embed_color
-                )
-                embed.set_footer(text=f"{interaction.guild.name} | 67")
-                await chan.send(embed=embed)
+                # 完全沿用一般升等的解析與發送邏輯，渲染出你自訂的升等訊息
+                txt = parse_placeholders(lrow[1], user, interaction.guild, extra={"level": level})
+                await chan.send(txt)
         except Exception as e:
-            logger.error(f"[setlevel 公告發送出錯]: {e}")
+            logger.error(f"[setlevel 發送升等訊息出錯]: {e}")
+
 
 
 # 🛠️ 修正點：完全遵循圖 6 藍圖重製的 /level 面板，無任何自創欄位或隱藏修改
