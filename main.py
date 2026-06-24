@@ -78,6 +78,10 @@ init_db()
 # 🔄 3. CORE UTILITIES (核心工具函式與變數解析)
 # =================================================================
 def get_xp_needed(level: int, is_admin: bool = False) -> int:
+    if is_admin:
+        return 150  # 管理員專屬：每一等都固定只要 150 XP
+    return 5 * (level ** 2) + 50 * level + 100
+
 async def check_level_roles(member: discord.Member, level: int):
     """檢查並發放該等級對應的身分組獎勵"""
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
@@ -92,9 +96,6 @@ async def check_level_roles(member: discord.Member, level: int):
                 await member.add_roles(role)
             except discord.Forbidden:
                 logger.error(f"[身分組發放失敗]: 權限不足，無法給予 {member.name} 身分組 {role.name}")
-    if is_admin:
-        return 150  # 管理員專屬：每一等都固定只要 150 XP
-    return 5 * (level ** 2) + 50 * level + 100
 
 
 def parse_placeholders(text: str, member: discord.Member, guild: discord.Guild, inviter: discord.Member = None, extra: dict = None) -> str:
