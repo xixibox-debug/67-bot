@@ -151,7 +151,7 @@ class SixSevenBot(commands.Bot):
 
     @tasks.loop(seconds=30)
     async def check_time_announcements(self):
-        tz = datetime.timezone(datetime.timedelta(hours=8))
+        tz = datetime.timezone(datetime.timedelta(hours=0))
         now = datetime.datetime.now(tz).strftime("%H:%M")
         if now == self.last_announced_minute: return
         conn = sqlite3.connect(DB_PATH)
@@ -672,7 +672,7 @@ async def ecodaily(interaction: discord.Interaction):
     uid = str(interaction.user.id)
     ensure_eco_user(uid)
     
-    tz = datetime.timezone(datetime.timedelta(hours=8))
+    tz = datetime.timezone(datetime.timedelta(hours=0))
     current_day = datetime.datetime.now(tz).strftime("%Y-%m-%d")
     
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
