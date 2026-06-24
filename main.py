@@ -57,8 +57,11 @@ init_db()
 # =================================================================
 # 🔄 3. CORE UTILITIES (核心工具函式與變數解析)
 # =================================================================
-def get_xp_needed(level: int) -> int:
+def get_xp_needed(level: int, is_admin: bool = False) -> int:
+    if is_admin:
+        return 150  # 管理員專屬：每一等都固定只要 150 XP
     return 5 * (level ** 2) + 50 * level + 100
+
 
 def parse_placeholders(text: str, member: discord.Member, guild: discord.Guild, inviter: discord.Member = None, extra: dict = None) -> str:
     if not text: return ""
