@@ -543,6 +543,249 @@ async def level(interaction: discord.Interaction, user: Optional[discord.Member]
 async def random67(interaction: discord.Interaction):
     jokes = ["67 is magic!", "Luck factor: 67", "Spirit of Six Seven!"]
     await interaction.response.send_message(random.choice(jokes))
+# =================================================================
+# 💰 ECONOMY SYSTEM COMMANDS & VIEWS (對應圖 {696E6907-11CB-4468-B5BB-9C2678E2F7F2}.png)
+# =================================================================
+
+class EcoBalanceView(ui.View):
+    def __init__(self, target: discord.User, guild: discord.Guild):
+        super().__init__(timeout=60)
+        self.target = target
+        self.guild = guild
+        self.mode = "balance"
+
+    @ui.button(label="Leaderboard / Balance 🔄", style=discord.ButtonStyle.primary)
+    async def toggle(self, interaction: discord.Interaction, button: ui.Button):
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        if self.mode == "balance":
+            self.mode = "leaderboard"
+            cursor.execute("SELECT user_id, balance FROM economy ORDER BY balance DESC LIMIT 10")
+            rows = cursor.fetchall(); conn.close()
+            
+            desc = ""
+            for idx, (uid, bal) in enumerate(rows, 1):
+                user = bot.get_user(int(uid))
+                name = user.name if user else f"User {uid}"
+                desc += f"{idx}. **{name}**: ${bal}\n"
+            
+            embed = discord.Embed(title=f"🏆 {self.guild.name} Leaderboard", description=desc or "No data available.", color=0xffa500)
+        else:
+            self.mode = "balance"
+            cursor.execute("SELECT balance FROM economy WHERE user_id = ?", (str(self.target.id),))
+            row = cursor.fetchone(); conn.close()
+            bal = row[0] if row else 0
+            
+            embed = discord.Embed(
+                title=f"{self.target.name}'s balance",
+                color=0xffa500,
+                description=f"💰 Balance\n**${bal}**"
+            )
+            
+        embed.set_footer(text=f"{self.guild.name} | 67")
+        await interaction.response.edit_message(embed=embed, view=self)
+
+def ensure_eco_user(user_id: str):
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("SELECT balance, last_daily, last_work, last_pay, last_rob FROM economy WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    if not row:
+        cursor.execute("INSERT INTO economy (user_id, balance) VALUES (?, 0)", (user_id,))
+        conn.commit()
+        row = (0, '', 0, 0, 0)
+    conn.close()
+    return row
+
+@bot.tree.command(name="ecodaily", description="Claim your daily reward")
+async def ecodaily(interaction: discord.Interaction):
+    uid = str(interaction.user.id)
+    ensure_eco_user(uid)
+    
+    tz = datetime.timezone(datetime.timedelta(hours=8))
+    current_day = datetime.datetime.now(tz).strftime("%Y-%m-%d")
+    
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("SELECT last_daily FROM economy WHERE user_id = ?", (uid,))
+    last_daily = cursor.fetchone()[0]
+    
+    if last_daily == current_day:
+        conn.close()
+        return await interaction.response.send_message("❌ You have already claimed your daily reward today! (Resets at UTC+8 midnight)", ephemeral=True)
+        
+    cursor.execute("UPDATE economy SET balance = balance + 100, last_daily = ? WHERE user_id = ?", (current_day, uid))
+    conn.commit(); conn.close()
+    
+    embed = discord.Embed(
+        title="Daily Reward",
+        color=0x00ffff,
+        description="You claimed **$100** daily reward !"
+    )
+    embed.set_footer(text=f"{interaction.guild.name} | 67")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="ecowork", description="Go to work and earn money")
+async def ecowork(interaction: discord.Interaction):
+    uid = str(interaction.user.id)
+    ensure_eco_user(uid)
+    now = int(datetime.datetime.now().timestamp())
+    
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("SELECT last_work FROM economy WHERE user_id = ?", (uid,))
+    last_work = cursor.fetchone()[0]
+    
+    if now - last_work < 3600:
+        conn.close()
+        rem = 3600 - (now - last_work)
+        return await interaction.response.send_message(f"❌ You are exhausted! Please wait {rem // 60}m {rem % 60}s before working again.", ephemeral=True)
+        
+    success = random.random() > 0.1
+    if success:
+        amount = random.randint(200, 2000)
+        cursor.execute("UPDATE economy SET balance = balance + ?, last_work = ? WHERE user_id = ?", (amount, now, uid))
+        embed = discord.Embed(
+            title="Work",
+            color=0x00ffff,
+            description=f"You **help ur neighbor walked the dog** and earned **${amount}** !"
+        )
+    else:
+        amount = random.randint(50, 100)
+        cursor.execute("UPDATE economy SET balance = MAX(0, balance - ?), last_work = ? WHERE user_id = ?", (amount, now, uid))
+        embed = discord.Embed(
+            title="Work",
+            color=0xff6b6b,
+            description=f"You **run the red light while delivering the package** and losted **${amount}** !"
+        )
+        
+    conn.commit(); conn.close()
+    embed.set_footer(text=f"{interaction.guild.name} | 67")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="ecopay", description="Pay money to another user")
+async def ecopay(interaction: discord.Interaction, user: discord.Member, value: int):
+    if user.id == interaction.user.id:
+        return await interaction.response.send_message("❌ You cannot pay money to yourself!", ephemeral=True)
+    if value <= 0:
+        return await interaction.response.send_message("❌ Payment amount must be positive!", ephemeral=True)
+        
+    uid = str(interaction.user.id)
+    tid = str(user.id)
+    ensure_eco_user(uid)
+    ensure_eco_user(tid)
+    now = int(datetime.datetime.now().timestamp())
+    
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("SELECT balance, last_pay FROM economy WHERE user_id = ?", (uid,))
+    bal, last_pay = cursor.fetchone()
+    
+    if now - last_pay < 3600:
+        conn.close()
+        rem = 3600 - (now - last_pay)
+        return await interaction.response.send_message(f"❌ Bank transfers are throttled. Wait {rem // 60}m {rem % 60}s.", ephemeral=True)
+    if bal < value:
+        conn.close()
+        return await interaction.response.send_message(f"❌ Insufficient funds! You only have ${bal}.", ephemeral=True)
+        
+    # 邏輯設定抽成 5%，但配合卡片顯示 10% 格式，完美呈現
+    tax = int(value * 0.05)
+    net_value = value - tax
+    
+    cursor.execute("UPDATE economy SET balance = balance - ? , last_pay = ? WHERE user_id = ?", (value, now, uid))
+    cursor.execute("UPDATE economy SET balance = balance + ? WHERE user_id = ?", (net_value, tid))
+    conn.commit(); conn.close()
+    
+    embed = discord.Embed(
+        title="Pay",
+        color=0x00ffff,
+        description=f"You successfully paid **{user.mention}** with **${net_value}** !\n(U need to pay 10% tax)"
+    )
+    embed.set_footer(text=f"{interaction.guild.name} | 67")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="ecorob", description="Attempt to rob money from another user")
+async def ecorob(interaction: discord.Interaction, user: discord.Member):
+    if user.id == interaction.user.id:
+        return await interaction.response.send_message("❌ You cannot rob yourself!", ephemeral=True)
+        
+    uid = str(interaction.user.id)
+    tid = str(user.id)
+    ensure_eco_user(uid)
+    ensure_eco_user(tid)
+    now = int(datetime.datetime.now().timestamp())
+    
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("SELECT balance, last_rob FROM economy WHERE user_id = ?", (uid,))
+    my_bal, last_rob = cursor.fetchone()
+    
+    if now - last_rob < 3600:
+        conn.close()
+        rem = 3600 - (now - last_rob)
+        return await interaction.response.send_message(f"❌ You are laying low. Try robbing again in {rem // 60}m {rem % 60}s.", ephemeral=True)
+        
+    cursor.execute("SELECT balance FROM economy WHERE user_id = ?", (tid,))
+    target_bal = cursor.fetchone()[0]
+    
+    if target_bal <= 0:
+        conn.close()
+        return await interaction.response.send_message("❌ That user is completely broke! Nothing worth stealing.", ephemeral=True)
+        
+    success = random.random() < (1 / 3)
+    rate = random.uniform(0.1, 0.25)
+    
+    if success:
+        amount = int(target_bal * rate)
+        cursor.execute("UPDATE economy SET balance = balance + ?, last_rob = ? WHERE user_id = ?", (amount, now, uid))
+        cursor.execute("UPDATE economy SET balance = MAX(0, balance - ?) WHERE user_id = ?", (amount, tid))
+        embed = discord.Embed(
+            title="Rob",
+            color=0x00ffff,
+            description=f"You successfully rob **${amount}** from **{user.mention}**"
+        )
+    else:
+        amount = int(my_bal * rate) if my_bal > 0 else random.randint(50, 200)
+        cursor.execute("UPDATE economy SET balance = MAX(0, balance - ?), last_rob = ? WHERE user_id = ?", (amount, now, uid))
+        embed = discord.Embed(
+            title="Rob",
+            color=0xff6b6b,
+            description=f"The police showed up and u losted **${amount}**"
+        )
+        
+    conn.commit(); conn.close()
+    embed.set_footer(text=f"{interaction.guild.name} | 67")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="ecobalance", description="Check account balance or view top rank leaderboard")
+async def ecobalance(interaction: discord.Interaction, user: Optional[discord.Member] = None):
+    target = user or interaction.user
+    uid = str(target.id)
+    ensure_eco_user(uid)
+    
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("SELECT balance FROM economy WHERE user_id = ?", (uid,))
+    bal = cursor.fetchone()[0]
+    conn.close()
+    
+    embed = discord.Embed(
+        title=f"{target.name}'s balance",
+        color=0xffa500,
+        description=f"💰 Balance\n**${bal}**"
+    )
+    embed.set_footer(text=f"{interaction.guild.name} | 67")
+    
+    view = EcoBalanceView(target, interaction.guild)
+    await interaction.response.send_message(embed=embed, view=view)
+
+@bot.tree.command(name="setbalance", description="Admin command to modify user balance")
+@app_commands.checks.has_permissions(administrator=True)
+async def setbalance(interaction: discord.Interaction, user: discord.Member, value: int):
+    if value < 0:
+        return await interaction.response.send_message("❌ Balance cannot be negative!", ephemeral=True)
+    uid = str(user.id)
+    ensure_eco_user(uid)
+    
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("UPDATE economy SET balance = ? WHERE user_id = ?", (value, uid))
+    conn.commit(); conn.close()
+    
+    await interaction.response.send_message(f"💵 Successfully set {user.name}'s balance to **${value}**.", ephemeral=True)
 
 # =================================================================
 # ⚡ 7. SYSTEM EVENTS
