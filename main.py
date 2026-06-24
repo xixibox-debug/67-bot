@@ -450,7 +450,7 @@ async def kick_error(interaction: discord.Interaction, error: app_commands.AppCo
     if isinstance(error, app_commands.errors.MissingPermissions): await interaction.response.send_message("❌ 你沒有「踢出成員」的權限！", ephemeral=True)
 
 
-@@bot.tree.command(name="setlevel", description="Manually set a member's level")
+@bot.tree.command(name="setlevel", description="Manually set a member's level")
 @app_commands.checks.has_permissions(administrator=True)
 async def setlevel(interaction: discord.Interaction, user: discord.Member, level: int):
     if level < 1: return await interaction.response.send_message("❌ 等級不能小於 1！", ephemeral=True)
