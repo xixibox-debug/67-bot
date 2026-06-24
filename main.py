@@ -660,8 +660,9 @@ async def on_message(message: discord.Message):
         xp += random.randint(10, 25)
         
     new_lvl = lvl
-    while xp >= get_xp_needed(new_lvl):
-        xp -= get_xp_needed(new_lvl)
+    is_admin = message.author.guild_permissions.administrator if isinstance(message.author, discord.Member) else False
+    while xp >= get_xp_needed(new_lvl, is_admin):
+        xp -= get_xp_needed(new_lvl, is_admin)
         new_lvl += 1
         
     cursor.execute("INSERT OR REPLACE INTO levels (user_id, xp, level, count_67) VALUES (?, ?, ?, ?)", (uid, xp, new_lvl, count_67))
