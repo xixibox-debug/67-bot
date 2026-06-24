@@ -51,6 +51,16 @@ def init_db():
     cursor.execute("CREATE TABLE IF NOT EXISTS mutes (guild_id TEXT, banned_word TEXT, duration_str TEXT, PRIMARY KEY (guild_id, banned_word))")
     conn.commit()
     conn.close()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS economy (
+            user_id TEXT PRIMARY KEY,
+            balance INTEGER DEFAULT 0,
+            last_daily TEXT DEFAULT '',
+            last_work INTEGER DEFAULT 0,
+            last_pay INTEGER DEFAULT 0,
+            last_rob INTEGER DEFAULT 0
+        )
+    """)
 
 init_db()
 
