@@ -597,15 +597,31 @@ async def on_member_remove(member: discord.Member):
 
 @bot.event
 async def on_message(message: discord.Message):
+    # 排除機器人自己的訊息與私訊
     if message.author.bot or not message.guild: return
 
+    # 🎯 24/7 被標記監聽器（極度厭世英文回覆）
+    if bot.user.mentioned_in(message) and not message.mention_everyone:
+        annoyed_phrases = [
+            "Why are you even pinging me? Go away.",
+            "Don't @ me for no reason. I'm exhausted.",
+            "What do you want now? Stop messing with me.",
+            "Pinged me for what? Just let me exist in peace.",
+            "Unless the server is literally burning down, don't @ me."
+        ]
+        await message.reply(random.choice(annoyed_phrases))
+        return  # 被標記後直接敷衍回覆並結束，防止連續觸發後續的 67 造成洗頻
+
+    # -------------------------------------------------------------
+    # 原始邏輯：過濾標記並檢查 "67"
+    # -------------------------------------------------------------
     cleaned = re.sub(r'<@!?\d+>|<@&\d+>|<#\d+>|<a?:[a-zA-Z0-9_]+:\d+>|<t:\d+(?::[a-zA-Z])?>', '', message.content)
     occurrences = cleaned.count("67") + cleaned.count("6️⃣7️⃣")
     
     if occurrences > 0:
         await message.reply(f"# {message.author.mention} 67!!!!!")
 
-    # 🔒 檢查自動禁言黑名單（對應圖 1 之觸發警告卡片，紅色邊框 + 變數渲染）
+    # 🔒 檢查自動禁言黑名單
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
     cursor.execute("SELECT banned_word, duration_str FROM mutes WHERE guild_id = ?", (str(message.guild.id),))
     banned_list = cursor.fetchall()
