@@ -8,6 +8,7 @@ import random
 import re
 import sqlite3
 from typing import Optional
+import google.generativeai as genai
 
 # =================================================================
 # ⚙️ 1. GLOBAL BOT CONFIGURATIONS (全局設定)
