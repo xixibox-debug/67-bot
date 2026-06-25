@@ -1008,7 +1008,7 @@ async def on_message(message: discord.Message):
                 # 💡 在 Prompt 中直接注入嚴格限制，讓 Gemini 從源頭控制輸出長度
                 constrained_prompt = f"{clean_content}\n\n(⚠️ 系統絕對限制：請用繁體中文或英文精簡的回答，要口語化，內容「絕對不能超過 800 個字元」，請長話短短短說。)"
                 
-                # 🛠️ 核心修正：使用 asyncio.to_thread 執行同步呼叫，防止非同步死鎖導致機器人卡死無回應
+                # 🛠️ 核心修正：改用 asyncio.to_thread 呼叫同步生成，搭配 transport="rest" 徹底打破死鎖
                 import asyncio
                 response = await asyncio.to_thread(ai_model.generate_content, constrained_prompt)
                 ai_reply = response.text
@@ -1107,7 +1107,7 @@ async def on_message(message: discord.Message):
             try:
                 channel = message.guild.get_channel(int(lvl_row[0])) or await message.fetch_channel(int(lvl_row[0]))
                 if channel:
-                    # 使用標準的預設工具函式來解析豐富的變數（如 {server.name}、{user.mention} 等）
+                    # 使用標準的預設工具函式來解析豐富的變數
                     announce_msg = parse_placeholders(lvl_row[1], message.author, message.guild, extra={"level": new_lvl})
                     await channel.send(announce_msg)
             except Exception as e:
