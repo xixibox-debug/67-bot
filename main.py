@@ -1008,7 +1008,9 @@ async def on_message(message: discord.Message):
                 # 💡 在 Prompt 中直接注入嚴格限制，讓 Gemini 從源頭控制輸出長度
                 constrained_prompt = f"{clean_content}\n\n(⚠️ 系統絕對限制：請用繁體中文或英文精簡的回答，要口語化，內容「絕對不能超過 800 個字元」，請長話短短短說。)"
                 
-                response = await ai_model.generate_content_async(constrained_prompt)
+                # 🛠️ 核心修正：使用 asyncio.to_thread 執行同步呼叫，防止非同步死鎖導致機器人卡死無回應
+                import asyncio
+                response = await asyncio.to_thread(ai_model.generate_content, constrained_prompt)
                 ai_reply = response.text
                 
                 # 📝 底層終極防線：防止 AI 偶爾無視指令爆字數，確保絕對不超過 800 字
@@ -1105,67 +1107,12 @@ async def on_message(message: discord.Message):
             try:
                 channel = message.guild.get_channel(int(lvl_row[0])) or await message.fetch_channel(int(lvl_row[0]))
                 if channel:
-                    announce_msg = lvl_row[1].replace("{level}", str(new_lvl)).replace("{user}", message.author.mention)
+                    # 使用標準的預設工具函式來解析豐富的變數（如 {server.name}、{user.mention} 等）
+                    announce_msg = parse_placeholders(lvl_row[1], message.author, message.guild, extra={"level": new_lvl})
                     await channel.send(announce_msg)
             except Exception as e:
                 logger.error(f"[發送升等訊息失敗]: {e}")
 
-    conn.close()
-
-    # 🔒 檢查自動禁言黑名單
-    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-    cursor.execute("SELECT banned_word, duration_str FROM mutes WHERE guild_id = ?", (str(message.guild.id),))
-    banned_list = cursor.fetchall()
-    for word, dur in banned_list:
-        if word in message.content:
-            try:
-                await message.delete()
-                delta, _ = parse_mute_duration(dur)
-                await message.author.timeout(delta or datetime.timedelta(minutes=10), reason="Auto Mute Triggered")
-                
-                embed = discord.Embed(
-                    title="HAHAHA 😂", 
-                    color=0xff0000, 
-                    description=f'{message.author.name} has been muted for {dur} due to he/she sent the message "{message.content}", you can try and be the next!'
-                )
-                embed.set_footer(text=f"{message.guild.name} | 67")
-                await message.channel.send(embed=embed)
-                conn.close()
-                return
-            except: pass
-
-    # 📈 經驗值與計數更新
-    uid = str(message.author.id)
-    cursor.execute("SELECT xp, level, count_67 FROM levels WHERE user_id = ?", (uid,))
-    row = cursor.fetchone()
-    xp, lvl, count_67 = row if row else (0, 1, 0)
-    
-    if occurrences > 0:
-        count_67 += occurrences
-        xp += (occurrences * 20) + random.randint(10, 25)
-    else:
-        xp += random.randint(10, 25)
-        
-    new_lvl = lvl
-    is_admin = message.author.guild_permissions.administrator if isinstance(message.author, discord.Member) else False
-    while xp >= get_xp_needed(new_lvl, is_admin):
-        xp -= get_xp_needed(new_lvl, is_admin)
-        new_lvl += 1
-        
-    cursor.execute("INSERT OR REPLACE INTO levels (user_id, xp, level, count_67) VALUES (?, ?, ?, ?)", (uid, xp, new_lvl, count_67))
-    conn.commit()
-
-    if new_lvl > lvl:
-        cursor.execute("SELECT channel_id, message FROM levelup WHERE guild_id = ?", (str(message.guild.id),))
-        lrow = cursor.fetchone()
-        if lrow and lrow[0]:
-            try:
-                chan = bot.get_channel(int(lrow[0])) or await bot.fetch_channel(int(lrow[0]))
-                if chan:
-                    txt = parse_placeholders(lrow[1], message.author, message.guild, extra={"level": new_lvl})
-                    await chan.send(txt)
-            except: pass
-            
     conn.close()
 
 # =================================================================
