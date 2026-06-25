@@ -169,6 +169,20 @@ class SixSevenBot(commands.Bot):
 bot = SixSevenBot()
 
 # =================================================================
+# 🧠 Gemini API 初始化設定 (新增區塊)
+# =================================================================
+import time  # 引入時間套件以供冷卻時間計算
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+ai_model = genai.GenerativeModel(
+    model_name='gemini-1.5-flash',
+    generation_config={"max_output_tokens": 600},
+    system_instruction="你是一個Discord群組的AI助手。請注意：你的回覆限制在800個字元以內，請精簡扼要地回答，絕對不能長篇大論！"
+)
+
+ai_cooldowns = {}
+
+# =================================================================
 # 🖥️ 5. INTERACTIVE UI (MODALS & VIEWS)
 # =================================================================
 
@@ -952,17 +966,67 @@ async def on_message(message: discord.Message):
     # 排除機器人自己的訊息與私訊
     if message.author.bot or not message.guild: return
 
-    # 🎯 24/7 被標記監聽器（極度厭世英文回覆）
+    # 🎯 標記監聽器（Gemini 智慧分流過濾版）
     if bot.user.mentioned_in(message) and not message.mention_everyone:
-        annoyed_phrases = [
-            "Why are you even pinging me? Go away.",
-            "Don't @ me for no reason. I'm exhausted.",
-            "What do you want now? Stop messing with me.",
-            "Pinged me for what? Just let me exist in peace.",
-            "Unless the server is literally burning down, don't @ me."
-        ]
-        await message.reply(random.choice(annoyed_phrases))
-        return  # 被標記後直接敷衍回覆並結束，防止連續觸發後續的 67 造成洗頻
+        
+        # 🧹 拔除訊息中的機器人標籤，只留下乾淨的問題文字
+        clean_content = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
+
+        # ---------------------------------------------------------
+        # 狀況 A：如果後面「沒有加任何文字」 -> 觸發原本的極度厭世英文回覆
+        # ---------------------------------------------------------
+        if not clean_content:
+            annoyed_phrases = [
+                "Why are you even pinging me? Go away.",
+                "Don't @ me for no reason. I'm exhausted.",
+                "What do you want now? Stop messing with me.",
+                "Pinged me for what? Just let me exist in peace.",
+                "Unless the server is literally burning down, don't @ me."
+            ]
+            await message.reply(random.choice(annoyed_phrases))
+            return
+
+        # ---------------------------------------------------------
+        # 狀況 B：後面「有加提問文字」 -> 進行限制檢查並呼叫 Gemini
+        # ---------------------------------------------------------
+        
+        # 🛡️ 限制一：使用者發送內容限制在 100 個英文單字/字詞內
+        word_count = len(clean_content.split())
+        if word_count > 100:
+            await message.reply(f"❌ 你的問題太長了！請長話短說，限制在 100 個字詞內。（你目前輸入了 {word_count} 個字詞）")
+            return
+
+        # 🛡️ 限制二：使用者冷卻時間 30 秒
+        current_time = time.time()
+        user_id = message.author.id
+        if user_id in ai_cooldowns:
+            time_passed = current_time - ai_cooldowns[user_id]
+            if time_passed < 30:
+                remaining = int(30 - time_passed)
+                await message.reply(f"⏱️ 喂，問太快了。請等 {remaining} 秒後再標記我。")
+                return
+
+        # 通過前兩道防線，更新該使用者的最後發言時間
+        ai_cooldowns[user_id] = current_time
+
+        # 🚀 開始呼叫 Gemini AI
+        try:
+            # 亮起 Discord 的「機器人正在輸入中...」狀態
+            async with message.channel.typing():
+                response = await ai_model.generate_content_async(clean_content)
+                ai_reply = response.text
+                
+                # 📝 保險底層防線：防止 Gemini 偶爾暴走超過 800 字導致 Discord 拒發
+                if len(ai_reply) > 800:
+                    ai_reply = ai_reply[:797] + "..."
+                
+                await message.reply(ai_reply)
+                return  # 對話完直接結束，不觸發後續的 67 邏輯
+                
+        except Exception as e:
+            logger.error(f"[Gemini API 錯誤]: {e}")
+            await message.reply("❌ 我的大腦暫時離線了，請過一陣子再試。")
+            return
 
 # =================================================================
     # 📈 LEVEL SYSTEM & AUTO ROLE DISPATCHER
