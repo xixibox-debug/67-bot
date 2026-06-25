@@ -172,7 +172,7 @@ bot = SixSevenBot()
 # 🧠 Gemini API 初始化設定 (新增區塊)
 # =================================================================
 import time  # 引入時間套件以供冷卻時間計算
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"), transport="rest")
 
 ai_model = genai.GenerativeModel(
     model_name='gemini-1.5-flash',
