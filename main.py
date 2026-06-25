@@ -1112,15 +1112,6 @@ async def on_message(message: discord.Message):
 
     conn.close()
 
-    # -------------------------------------------------------------
-    # 原始邏輯：過濾標記並檢查 "67"
-    # -------------------------------------------------------------
-    cleaned = re.sub(r'<@!?\d+>|<@&\d+>|<#\d+>|<a?:[a-zA-Z0-9_]+:\d+>|<t:\d+(?::[a-zA-Z])?>', '', message.content)
-    occurrences = cleaned.count("67") + cleaned.count("6️⃣7️⃣")
-    
-    if occurrences > 0:
-        await message.reply(f"# {message.author.mention} 67!!!!!")
-
     # 🔒 檢查自動禁言黑名單
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
     cursor.execute("SELECT banned_word, duration_str FROM mutes WHERE guild_id = ?", (str(message.guild.id),))
