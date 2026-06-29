@@ -35,7 +35,7 @@ ai_client = AsyncOpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=os.getenv("GROQ_API_KEY")
 )
-CURRENT_MODEL = "llama3-8b-8192"  # 使用極速且聰明的 Llama 3 8B 模型
+CURRENT_MODEL = "llama-3.3-70b-versatile"  # 使用極速且聰明的 Llama 3 8B 模型
 ai_cooldowns = {}
 
 # =================================================================
