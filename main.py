@@ -157,7 +157,7 @@ class SixSevenBot(commands.Bot):
         self.check_time_announcements.start()
         await self.tree.sync()
 
-    @tasks.loop(seconds=30)
+    @tasks.loop(seconds=20)
     async def rotate_status(self):
         await self.wait_until_ready()  # 🎯 加上這一行：等待機器人完全準備好
         self.status_index = (self.status_index + 1) % len(WATCHING_STATUSES)
