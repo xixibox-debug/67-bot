@@ -1036,7 +1036,7 @@ async def on_message(message: discord.Message):
                     messages=[
                         {
                             "role": "system", 
-                            "content": "你是一個Discord的機器人叫做67的內建AI。請注意：你的回覆限制在800個字元以內，請精簡扼要地回答，絕對不能長篇大論！請一律使用繁體中文或英文口語化回答，回覆的語言取決於使用者的問題。"
+                            "content": "你是一個Discord的機器人叫做67的內建AI，你的用途是提供像meta ai一樣的聊天協助。請注意：你的回覆限制在800個字元以內，請精簡扼要地回答，絕對不能長篇大論！原則上使用英文回答，如果使用者問的問題是其他語言就用該語言回答，注意中文只能用繁體中文"
                         },
                         {
                             "role": "user", 
@@ -1104,7 +1104,7 @@ async def on_message(message: discord.Message):
     cleaned = re.sub(r'<@!?\d+>|<@&\d+>|<#\d+>|<a?:[a-zA-Z0-9_]+:\d+>|<t:\d+(?::[a-zA-Z])?>', '', message.content)
     cleaned = re.sub(r'https?://\S+', '', cleaned)  # 🎯 核心修正：利用正規表達式將所有 http/https 網址抹除，防範網址內含 67 造成誤判
     
-    occurrences = cleaned.count("67") + cleaned.count("6️⃣7️⃣")
+    occurrences = cleaned.count("67") + cleaned.count(":six: :seven:")
     if occurrences > 0:
         await message.reply(f"# {message.author.mention} 67!!!!!")
 
@@ -1182,13 +1182,6 @@ async def on_message(message: discord.Message):
                 logger.error(f"[Auto Mute 錯誤]: {e}")
                 pass
 
-    # =================================================================
-    # 6️⃣7️⃣ 2. 檢查 "67" 關鍵字與次數統計
-    # =================================================================
-    cleaned = re.sub(r'<@!?\d+>|<@&\d+>|<#\d+>|<a?:[a-zA-Z0-9_]+:\d+>|<t:\d+(?::[a-zA-Z])?>', '', message.content)
-    occurrences = cleaned.count("67") + cleaned.count("6️⃣7️⃣")
-    if occurrences > 0:
-        await message.reply(f"# {message.author.mention} 67!!!!!")
 
     # =================================================================
     # 📈 3. 經驗值更新、升等檢查、身分組與通知發放
