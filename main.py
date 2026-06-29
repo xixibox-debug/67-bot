@@ -7,8 +7,9 @@ import os
 import random
 import re
 import sqlite3
+import time  # 引入時間套件以供冷卻時間計算
 from typing import Optional
-import google.generativeai as genai
+from openai import AsyncOpenAI  # 👈 改為導入 OpenAI 非同步客戶端
 
 # =================================================================
 # ⚙️ 1. GLOBAL BOT CONFIGURATIONS (全局設定)
@@ -26,6 +27,16 @@ if os.path.dirname(DB_PATH):
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("SixSevenBot")
+
+# =================================================================
+# 🧠 Groq API 初始化設定（完全取代原先 Gemini，絕不卡死）
+# =================================================================
+ai_client = AsyncOpenAI(
+    base_url="https://api.groq.com/openai/v1",
+    api_key=os.getenv("GROQ_API_KEY")
+)
+CURRENT_MODEL = "llama3-8b-8192"  # 使用極速且聰明的 Llama 3 8B 模型
+ai_cooldowns = {}
 
 # =================================================================
 # 🗄️ 2. DATABASE INITIALIZATION (資料庫初始化)
@@ -150,7 +161,7 @@ class SixSevenBot(commands.Bot):
         self.status_index = (self.status_index + 1) % len(WATCHING_STATUSES)
         await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name=WATCHING_STATUSES[self.status_index]))
 
-    @tasks.loop(seconds=30)
+    @tasks.loop(seconds=15)
     async def check_time_announcements(self):
         tz = datetime.timezone(datetime.timedelta(hours=0))
         now = datetime.datetime.now(tz).strftime("%H:%M")
@@ -280,11 +291,11 @@ class LevelSettingsView(ui.View):
         conn.commit(); conn.close()
         await interaction.response.send_message(f"✅ Level channel set to {select.values[0].mention}", ephemeral=True)
         
-    @ui.button(label="🎭 設置等級身分組", style=discord.ButtonStyle.blurple, row=2)
+    @ui.button(label="🎭 Give role to selected level", style=discord.ButtonStyle.blurple, row=2)
     async def go_level_role(self, interaction: discord.Interaction, button: ui.Button):
         embed = discord.Embed(
-            title="🎭 等級身分組獎勵設定", 
-            description="請先在下方選單**選擇一個身分組**，隨後系統會彈出視窗請你輸入**指定的解鎖等級**。", 
+            title="🎭 Role awards settings", 
+            description="Choose a **role** below and than set the **level**。", 
             color=0x2b2d31
         )
         await interaction.response.edit_message(embed=embed, view=LevelRoleSettingsView(self))
@@ -307,7 +318,7 @@ class LevelRoleModal(ui.Modal, title="設定等級身分組獎勵"):
             lvl = int(self.level_input.value)
             if lvl < 1: raise ValueError
         except ValueError:
-            return await interaction.response.send_message("❌ 請輸入大於 0 的有效整數！", ephemeral=True)
+            return await interaction.response.send_message("❌ WHY u entered a num under than 1?", ephemeral=True)
 
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
         cursor.execute("INSERT OR REPLACE INTO level_roles (guild_id, level, role_id) VALUES (?, ?, ?)", 
@@ -324,7 +335,7 @@ class LevelRoleSettingsView(ui.View):
     async def select_role(self, interaction: discord.Interaction, select: ui.RoleSelect):
         await interaction.response.send_modal(LevelRoleModal(select.values[0], self))
 
-    @ui.button(label="⬅️ 返回等級設定", style=discord.ButtonStyle.gray)
+    @ui.button(label="⬅️ Back", style=discord.ButtonStyle.gray)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
         embed = discord.Embed(title="⚙️ Level System Configuration", description="請選擇你要調整的等級系統設定：", color=0x2b2d31)
         await interaction.response.edit_message(embed=embed, view=self.original_view)
@@ -345,7 +356,7 @@ class AutoMuteModal(ui.Modal, title="Add Banned Word"):
         conn.commit(); conn.close()
         self.view.update_select_menu()
         await interaction.response.edit_message(view=self.view)
-        await interaction.followup.send(f"🔒 Banned word `{self.word.value}` added.", ephemeral=True)
+        await interaction.followup.send(f"🔒 Auto mute `{self.word.value}` added.", ephemeral=True)
 
 
 class BannedWordDeleteSelect(ui.Select):
@@ -358,7 +369,7 @@ class BannedWordDeleteSelect(ui.Select):
         conn.commit(); conn.close()
         self.view.update_select_menu()
         await interaction.response.edit_message(view=self.view)
-        await interaction.followup.send(f"✅ Removed rule for: `{word}`", ephemeral=True)
+        await interaction.followup.send(f"✅ Removed Auto mute for: `{word}`", ephemeral=True)
 
 
 class AutoMuteConfigView(ui.View):
@@ -402,7 +413,7 @@ class AnnouncementModal(ui.Modal, title="Add Time Message"):
         conn.commit(); conn.close()
         self.view.update_select_menu()
         await interaction.response.edit_message(view=self.view)
-        await interaction.followup.send(f"⏰ Announcement scheduler set at {self.t_time.value}", ephemeral=True)
+        await interaction.followup.send(f"⏰ Auto message time set at {self.t_time.value}", ephemeral=True)
 
 
 class TimeMessageDeleteSelect(ui.Select):
@@ -415,7 +426,7 @@ class TimeMessageDeleteSelect(ui.Select):
         conn.commit(); conn.close()
         self.view.update_select_menu()
         await interaction.response.edit_message(view=self.view)
-        await interaction.followup.send("✅ Scheduled announcement has been cancelled.", ephemeral=True)
+        await interaction.followup.send("✅ This Auto message has been cancelled.", ephemeral=True)
 
 
 class TimeMessageConfigView(ui.View):
@@ -456,7 +467,7 @@ class SettingsView(ui.View):
     def __init__(self): super().__init__(timeout=None)
     @ui.button(label="Welcome/Goodbye Panel", style=discord.ButtonStyle.secondary, emoji="👋")
     async def btn_w(self, interaction: discord.Interaction, btn: ui.Button):
-        embed = discord.Embed(title="👋 Welcome & Goodbye Settings", color=0x54a7dd, description="請先在下方下拉選單選擇發送頻道，再點擊按鈕編輯自訂卡片內容。")
+        embed = discord.Embed(title="👋 Welcome & Goodbye Settings", color=0x54a7dd, description="Select the target channel first, I will let u edit the embed content later.。")
         embed.set_footer(text=f"{interaction.guild.name} | 67")
         await interaction.response.edit_message(embed=embed, view=WelcomeConfigView())
         
@@ -911,17 +922,40 @@ async def on_ready():
 async def on_member_join(member: discord.Member):
     if member.bot: return
     try:
-        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-        cursor.execute("SELECT channel_id, w_title, w_desc FROM welcome WHERE guild_id = ?", (str(member.guild.id),))
+        guild = member.guild
+        inviter_found = None
+        
+        # 🎯 核心修正：比對開機時快取的邀請碼數量變化，抓出真正邀請人
+        if guild.id in bot.invites:
+            try:
+                old_invites = bot.invites[guild.id]
+                new_invites = await guild.invites()
+                bot.invites[guild.id] = new_invites  # 更新快取
+                
+                for old_inv in old_invites:
+                    for new_inv in new_invites:
+                        if old_inv.code == new_inv.code and new_inv.uses > old_inv.uses:
+                            inviter_found = new_inv.inviter
+                            break
+                    if inviter_found: break
+            except Exception as invite_err:
+                logger.error(f"[邀請碼追蹤失敗]: {invite_err}")
+                
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT channel_id, w_title, w_desc FROM welcome WHERE guild_id = ?", (str(guild.id),))
         row = cursor.fetchone(); conn.close()
+        
         if row and row[0]:
             try:
                 channel_id = int(row[0])
                 channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
             except: return
             if channel:
-                title = parse_placeholders(row[1] or "Welcome!", member, member.guild)
-                desc = parse_placeholders(row[2], member, member.guild)
+                # 🎯 修正點：將 inviter_found 傳入工具函式，不再盲目吐出 Someone
+                title = parse_placeholders(row[1] or "Welcome!", member, guild, inviter=inviter_found)
+                desc = parse_placeholders(row[2], member, guild, inviter=inviter_found)
+                
                 embed_color = discord.Color(0x54a7dd)
                 try:
                     from PIL import Image
@@ -932,9 +966,10 @@ async def on_member_join(member: discord.Member):
                     rgb = img.getpixel((0, 0))
                     embed_color = discord.Color.from_rgb(rgb[0], rgb[1], rgb[2])
                 except: pass
+                
                 embed = discord.Embed(title=title, description=desc, color=embed_color)
                 embed.set_thumbnail(url=member.display_avatar.url)
-                embed.set_footer(text=f"{member.guild.name} | 67")
+                embed.set_footer(text=f"{guild.name} | 67")
                 await channel.send(content=member.mention, embed=embed)
     except Exception as e: logger.error(f"[on_member_join 崩潰]: {e}")
 
@@ -967,9 +1002,9 @@ async def on_message(message: discord.Message):
     if message.author.bot or not message.guild: 
         return
 
-    # 🎯 標記監聽器（Gemini 智慧分流過濾版）
+    # 🎯 標記監聽器（Groq API 完美非同步版，支援單純標記與回覆標記）
     if bot.user.mentioned_in(message) and not message.mention_everyone:
-        # 🧹 拔除訊息中的機器人標籤，只留下乾淨的問題文字
+        # 🧹 拔除訊息中的機器人標籤與前後空格
         clean_content = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
 
         # 狀況 A：如果後面「沒有加任何文字」 -> 觸發原本的極度厭世英文回覆
@@ -984,10 +1019,10 @@ async def on_message(message: discord.Message):
             await message.reply(random.choice(annoyed_phrases))
             return
 
-        # 狀況 B：後面「有加提問文字」 -> 進行限制檢查並呼叫 Gemini
+        # 狀況 B：後面有字 -> 限制檢查並呼叫 Groq
         word_count = len(clean_content.split())
         if word_count > 100:
-            await message.reply(f"❌ nah, u give me {word_count} words, too much.）")
+            await message.reply(f"❌ nah, u give me {word_count} words, too much.")
             return
 
         # 使用者冷卻時間 30 秒
@@ -1002,27 +1037,130 @@ async def on_message(message: discord.Message):
 
         ai_cooldowns[user_id] = current_time
 
-        # 🚀 開始呼叫 Gemini AI
+        # 🚀 呼叫 Groq AI 
         try:
             async with message.channel.typing():
-                # 💡 在 Prompt 中直接注入嚴格限制，讓 Gemini 從源頭控制輸出長度
-                constrained_prompt = f"{clean_content}\n\n(⚠️ 系統絕對限制：請用繁體中文或英文精簡的回答，要口語化，內容「絕對不能超過 800 個字元」，請長話短短短說。)"
+                response = await ai_client.chat.completions.create(
+                    model=CURRENT_MODEL,
+                    messages=[
+                        {
+                            "role": "system", 
+                            "content": "你是一個Discord的機器人叫做67的內建AI。請注意：你的回覆限制在800個字元以內，請精簡扼要地回答，絕對不能長篇大論！請一律使用繁體中文或英文口語化回答，回覆的語言取決於使用者的問題。"
+                        },
+                        {
+                            "role": "user", 
+                            "content": clean_content
+                        }
+                    ],
+                    max_tokens=400,
+                    temperature=0.7
+                )
+                ai_reply = response.choices[0].message.content
                 
-                # 🛠️ 核心修正：改用 asyncio.to_thread 呼叫同步生成，搭配 transport="rest" 徹底打破死鎖
-                import asyncio
-                response = await asyncio.to_thread(ai_model.generate_content, constrained_prompt)
-                ai_reply = response.text
-                
-                # 📝 底層終極防線：防止 AI 偶爾無視指令爆字數，確保絕對不超過 800 字
                 if len(ai_reply) > 800:
                     ai_reply = ai_reply[:797] + "..."
                     
                 await message.reply(ai_reply)
-                return  # 對話完直接結束，不觸發後續的等級與計數系統
+                return  # 結束事件
         except Exception as e:
-            logger.error(f"[Gemini API 錯誤]: {e}")
-            await message.reply("❌ 我的大腦暫時離線了，請過一陣子再試。")
+            logger.error(f"[Groq API 錯誤]: {e}")
+            await message.reply("❌ Open AI suck, try again later.")
             return
+
+    # =================================================================
+    # 🔒 1. 自動禁言黑名單檢查（修復：刪除前發送通知、被禁言的人看得見時間）
+    # =================================================================
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT banned_word, duration_str FROM mutes WHERE guild_id = ?", (str(message.guild.id),))
+    banned_list = cursor.fetchall()
+    for word, dur in banned_list:
+        if word in message.content:
+            try:
+                # 🎯 修正點：在刪除原訊息前，先「私訊」給違規用戶，確保他絕對看得到自己被關多久、為什麼被關
+                try:
+                    await message.author.send(
+                        f"⚠️ **Auto mute**\n"
+                        f"U sent `\"{word}\"` in **{message.guild.name}**\n"
+                        f"And u have been **Timeout** for** {dur}** by system.\n"
+                        f"ur original message: \n> {message.content}"
+                    )
+                except discord.Forbidden:
+                    pass  # 對方若關閉陌生人私訊則略過，不讓程式崩潰
+
+                await message.delete()
+                delta, _ = parse_mute_duration(dur)
+                await message.author.timeout(delta or datetime.timedelta(minutes=10), reason="Auto Mute Triggered")
+                
+                # 🎯 修正點：公開頻道警示也改用 mention 標記，讓他事後看得到
+                embed = discord.Embed(
+                    title="HAHAHA 😂", 
+                    color=0xff0000, 
+                    description=f'{message.author.mention} has been muted for **{dur}** due to sending a blocked word, you can try and be the next!'
+                )
+                embed.set_footer(text=f"{message.guild.name} | 67")
+                await message.channel.send(embed=embed)
+                conn.close()
+                return 
+            except Exception as e:
+                logger.error(f"[Auto Mute 錯誤]: {e}")
+                pass
+
+    # =================================================================
+    # 6️⃣7️⃣ 2. 檢查 "67" 關鍵字與次數統計（修復：排除網址）
+    # =================================================================
+    cleaned = re.sub(r'<@!?\d+>|<@&\d+>|<#\d+>|<a?:[a-zA-Z0-9_]+:\d+>|<t:\d+(?::[a-zA-Z])?>', '', message.content)
+    cleaned = re.sub(r'https?://\S+', '', cleaned)  # 🎯 核心修正：利用正規表達式將所有 http/https 網址抹除，防範網址內含 67 造成誤判
+    
+    occurrences = cleaned.count("67") + cleaned.count("6️⃣7️⃣")
+    if occurrences > 0:
+        await message.reply(f"# {message.author.mention} 67!!!!!")
+
+    # =================================================================
+    # 📈 3. 經驗值更新、升等檢查、身分組與通知發放
+    # =================================================================
+    uid = str(message.author.id)
+    gid = str(message.guild.id)
+    
+    cursor.execute("SELECT xp, level, count_67 FROM levels WHERE user_id = ?", (uid,))
+    row = cursor.fetchone()
+    xp, lvl, count_67 = row if row else (0, 1, 0)
+
+    if occurrences > 0:
+        count_67 += occurrences
+        xp_gained = (occurrences * 20) + random.randint(15, 25)
+    else:
+        xp_gained = random.randint(15, 25)
+        
+    new_xp = xp + xp_gained
+    new_lvl = lvl
+    
+    is_admin = message.author.guild_permissions.administrator if isinstance(message.author, discord.Member) else False
+    
+    while new_xp >= get_xp_needed(new_lvl, is_admin):
+        new_xp -= get_xp_needed(new_lvl, is_admin)
+        new_lvl += 1
+
+    cursor.execute("INSERT OR REPLACE INTO levels (user_id, xp, level, count_67) VALUES (?, ?, ?, ?)", (uid, new_xp, new_lvl, count_67))
+    conn.commit()
+
+    if new_lvl > lvl:
+        for l in range(lvl + 1, new_lvl + 1):
+            await check_level_roles(message.author, l)
+            
+        cursor.execute("SELECT channel_id, message FROM levelup WHERE guild_id = ?", (gid,))
+        lvl_row = cursor.fetchone()
+        if lvl_row and lvl_row[0]:
+            try:
+                channel = message.guild.get_channel(int(lvl_row[0])) or await message.fetch_channel(int(lvl_row[0]))
+                if channel:
+                    announce_msg = parse_placeholders(lvl_row[1], message.author, message.guild, extra={"level": new_lvl})
+                    await channel.send(announce_msg)
+            except Exception as e:
+                logger.error(f"[發送升等訊息失敗]: {e}")
+
+    conn.close()
 
     # =================================================================
     # 🔒 1. 自動禁言黑名單檢查 (開啟單一資料庫連線)
