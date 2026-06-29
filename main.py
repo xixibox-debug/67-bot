@@ -18,7 +18,7 @@ WATCHING_STATUSES = [
     "67",
     "/settings",
     "Six Seven",
-    "24/7 Auto Mute"
+    "24/7 Auto Mute",
     "67 + AI Smart response"
 ]
 
