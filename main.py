@@ -156,13 +156,15 @@ class SixSevenBot(commands.Bot):
         self.check_time_announcements.start()
         await self.tree.sync()
 
-    @tasks.loop(seconds=5)
+    @tasks.loop(seconds=30)
     async def rotate_status(self):
+        await self.wait_until_ready()  # 🎯 加上這一行：等待機器人完全準備好
         self.status_index = (self.status_index + 1) % len(WATCHING_STATUSES)
         await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name=WATCHING_STATUSES[self.status_index]))
 
     @tasks.loop(seconds=15)
     async def check_time_announcements(self):
+        await self.wait_until_ready()  # 🎯 這一行也順便加，以防萬一
         tz = datetime.timezone(datetime.timedelta(hours=0))
         now = datetime.datetime.now(tz).strftime("%H:%M")
         if now == self.last_announced_minute: return
