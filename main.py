@@ -19,6 +19,7 @@ WATCHING_STATUSES = [
     "/settings",
     "Six Seven",
     "24/7 Auto Mute"
+    "67 + AI Smart response"
 ]
 
 DB_PATH = os.getenv("DATABASE_PATH", "data/bot.db")
@@ -107,7 +108,7 @@ async def check_level_roles(member: discord.Member, level: int):
             try:
                 await member.add_roles(role)
             except discord.Forbidden:
-                logger.error(f"[身分組發放失敗]: 權限不足，無法給予 {member.name} 身分組 {role.name}")
+                logger.error(f"nah, I can't give **{role.name}** to **{member.name}**")
 
 
 def parse_placeholders(text: str, member: discord.Member, guild: discord.Guild, inviter: discord.Member = None, extra: dict = None) -> str:
@@ -192,7 +193,7 @@ class ManualMsgModal(ui.Modal, title="Send Manual Message"):
     text = ui.TextInput(label="Message Content", style=discord.TextStyle.paragraph, required=True, placeholder="Type your text here...")
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.channel.send(self.text.value)
-        await interaction.response.send_message("✅ Raw text message sent successfully.", ephemeral=True)
+        await interaction.response.send_message("✅ Manual message sent successfully.", ephemeral=True)
 
 
 # 🛠️ 修正點：縮短 Label 長度至 45 字元內，防範 Discord API 噴出 400 錯誤（對應圖 5）
@@ -296,8 +297,8 @@ class LevelSettingsView(ui.View):
         await interaction.response.send_modal(LevelMessageModal())
 
 
-class LevelRoleModal(ui.Modal, title="設定等級身分組獎勵"):
-    level_input = ui.TextInput(label="達到幾等給予此身分組？", placeholder="例如：10", min_length=1, max_length=3)
+class LevelRoleModal(ui.Modal, title="Set give role to select level"):
+    level_input = ui.TextInput(label="Tell me the level?", placeholder="ex: 10", min_length=1, max_length=3)
 
     def __init__(self, role: discord.Role, parent_view):
         super().__init__()
@@ -315,7 +316,7 @@ class LevelRoleModal(ui.Modal, title="設定等級身分組獎勵"):
         cursor.execute("INSERT OR REPLACE INTO level_roles (guild_id, level, role_id) VALUES (?, ?, ?)", 
                        (str(interaction.guild.id), lvl, str(self.role.id)))
         conn.commit(); conn.close()
-        await interaction.response.send_message(f"✅ 設定成功！成員達到 **Lv. {lvl}** 時將自動獲得 {self.role.mention}", ephemeral=True)
+        await interaction.response.send_message(f"✅ Saved. When user reach **Lv. {lvl}** will received role {self.role.mention}", ephemeral=True)
 
 class LevelRoleSettingsView(ui.View):
     def __init__(self, original_view):
