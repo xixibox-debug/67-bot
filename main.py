@@ -179,19 +179,8 @@ class SixSevenBot(commands.Bot):
 
 bot = SixSevenBot()
 
-# =================================================================
-# 🧠 Gemini API 初始化設定 (新增區塊)
-# =================================================================
 import time  # 引入時間套件以供冷卻時間計算
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"), transport="rest")
 
-ai_model = genai.GenerativeModel(
-    model_name='gemini-1.5-flash',
-    generation_config={"max_output_tokens": 600},
-    system_instruction="你是一個Discord群組的AI助手。請注意：你的回覆限制在800個字元以內，請精簡扼要地回答，絕對不能長篇大論！"
-)
-
-ai_cooldowns = {}
 
 # =================================================================
 # 🖥️ 5. INTERACTIVE UI (MODALS & VIEWS)
