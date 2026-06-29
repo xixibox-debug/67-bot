@@ -19,7 +19,7 @@ WATCHING_STATUSES = [
     "/settings",
     "Six Seven",
     "24/7 Auto Mute",
-    "67 + AI Smart response"
+    "Introducing 67+AI"
 ]
 
 DB_PATH = os.getenv("DATABASE_PATH", "data/bot.db")
