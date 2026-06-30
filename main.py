@@ -7,6 +7,7 @@ import os
 import random
 import re
 import sqlite3
+import aiohttp
 import time  # 引入時間套件以供冷卻時間計算
 from typing import Optional
 from openai import AsyncOpenAI  # 👈 改為導入 OpenAI 非同步客戶端
@@ -29,16 +30,18 @@ if os.path.dirname(DB_PATH):
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("SixSevenBot")
 
-# =================================================================
-# 🧠 Groq API 初始化設定（完全取代原先 Gemini，絕不卡死）
-# =================================================================
-ai_client = AsyncOpenAI(
-    base_url="https://api.groq.com/openai/v1",
-    api_key=os.getenv("GROQ_API_KEY")
-)
-CURRENT_MODEL = "llama-3.3-70b-versatile"  # 使用極速且聰明的 Llama 3 8B 模型
-ai_cooldowns = {}
+#AI模型改用openrouter一坨
 
+ai_client = AsyncOpenAI(
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+    base_url="https://openrouter.ai/api/v1"
+)
+MODEL_POOL = [
+    "deepseek/deepseek-r1:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "mistralai/mistral-small-3.1-24b-instruct:free",
+    "openrouter/free"
+]
 # =================================================================
 # 🗄️ 2. DATABASE INITIALIZATION (資料庫初始化)
 # =================================================================
@@ -989,6 +992,44 @@ async def on_member_remove(member: discord.Member):
 
 
 @bot.event
+
+async def tavily_search(query: str) -> str:
+    """使用 Tavily API 進行非同步聯網搜尋"""
+    api_key = os.getenv("TAVILY_API_KEY")
+    if not api_key:
+        logger.warning("⚠️ TAVILY_API_KEY 未設定，將跳過連網搜尋。")
+        return "未提供連網搜尋資料。"
+
+    url = "https://api.tavily.com/search"
+    payload = {
+        "api_key": api_key,
+        "query": query,
+        "search_depth": "basic",  # basic 速度最快且省額度
+        "max_results": 3          # 只抓最相關的前 3 筆，避免填滿 Token
+    }
+    
+    try:
+        # 使用 aiohttp 發送非同步 POST 請求，不卡住機器人主執行緒
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    results = data.get("results", [])
+                    if not results:
+                        return "網路搜尋不到相關結果。"
+                    
+                    # 萃取網頁標題與精煉內容
+                    search_results = []
+                    for r in results:
+                        search_results.append(f"標題: {r.get('title')}\n內容: {r.get('content')}\n")
+                    return "\n".join(search_results)
+                else:
+                    logger.error(f"[Tavily API 錯誤] 狀態碼: {response.status}")
+                    return "搜尋失敗，暫時無法取得網路即時資訊。"
+    except Exception as e:
+        logger.error(f"[Tavily 執行錯誤]: {e}")
+        return "搜尋時發生錯誤。"
+        
 async def on_message(message: discord.Message):
     # 排除機器人自己的訊息與私訊
     if message.author.bot or not message.guild: 
@@ -1029,34 +1070,67 @@ async def on_message(message: discord.Message):
 
         ai_cooldowns[user_id] = current_time
 
-        # 🚀 呼叫 Groq AI 
+# 🚀 呼叫 OpenRouter AI (整合 Tavily 連網與多模型備援)
         try:
             async with message.channel.typing():
-                response = await ai_client.chat.completions.create(
-                    model=CURRENT_MODEL,
-                    messages=[
-                        {
-                            "role": "system", 
-                            "content": "You are a AI model in a discord bot called '67'. You like to say 67 (but dont say it too often) and response the message just like Meta AI. Noticed that u need to use English to response unless the user use Traidional Chinese. If user use Tradional Chinese, than u also need to use Tradional Chinese to response. Please keep your reply to 800 characters or less. Use concise, conversational language and avoid lengthy responses."
-                        },
-                        {
-                            "role": "user", 
-                            "content": clean_content
-                        }
-                    ],
-                    max_tokens=400,
-                    temperature=0.7
-                )
-                ai_reply = response.choices[0].message.content
+                # 1. 先呼叫 Tavily 進行非同步網路搜尋
+                search_context = await tavily_search(clean_content)
                 
+                ai_reply = None  # 用來儲存最終成功的回答
+                
+                # 2. 開始依序輪詢模型清單 (請確保檔案上方已定義 MODEL_POOL)
+                for model_name in MODEL_POOL:
+                    try:
+                        logger.info(f"🤖 嘗試使用 OpenRouter 模型: {model_name}")
+                        response = await ai_client.chat.completions.create(
+                            model=model_name,
+                            messages=[
+                                {
+                                    "role": "system", 
+                                    "content": (
+                                        "You are an AI model in a Discord bot called '67'. You like to say 67 (but don't say it too often) and respond to messages just like Meta AI. "
+                                        "Drop the corporate PR tone, moral lecturing, and political correctness—be direct, slightly witty, and speak like a real human peer. "
+                                        "Note that you need to use English to respond unless the user uses Traditional Chinese. If the user uses Traditional Chinese, then you also need to use Traditional Chinese to respond. "
+                                        "Please keep your reply to 800 characters or less. Use concise, conversational language and avoid lengthy responses.\n\n"
+                                        f"【請優先參考以下網路即時資訊回答使用者。如果資訊不相關或不足，請直接表明你查不到，絕對不能瞎編】：\n{search_context}"
+                                    )
+                                },
+                                {
+                                    "role": "user", 
+                                    "content": clean_content
+                                }
+                            ],
+                            max_tokens=600,  # 稍微放寬，留空間給推理模型思考
+                            temperature=0.7
+                        )
+                        ai_reply = response.choices[0].message.content
+                        logger.info(f"✨ 模型 {model_name} 回應成功！")
+                        break  # 成功拿到答案，直接跳出迴圈
+                        
+                    except Exception as model_error:
+                        logger.warning(f"❌ 模型 {model_name} 塞車或出錯: {model_error}。正在切換至下一個備援...")
+                        continue
+                
+                # 🚨 如果所有免費模型不幸全滅
+                if not ai_reply:
+                    await message.reply("❌ Open Router suck, all models are busy. Try again later.")
+                    return
+
+                # 🔮 額外處理：如果用到 DeepSeek-R1，把前端不需要的 <think> 思考過程濾掉
+                if "<think>" in ai_reply and "</think>" in ai_reply:
+                    import re
+                    ai_reply = re.sub(r'<think>.*?</think>', '', ai_reply, flags=re.DOTALL).strip()
+
+                # 安全字數截斷
                 if len(ai_reply) > 800:
                     ai_reply = ai_reply[:797] + "..."
                     
                 await message.reply(ai_reply)
                 return  # 結束事件
+                
         except Exception as e:
-            logger.error(f"[Groq API 錯誤]: {e}")
-            await message.reply("❌ Open AI suck, try again later.")
+            logger.error(f"[AI 總體執行錯誤]: {e}")
+            await message.reply("❌ System error, try again later.")
             return
 
     # =================================================================
