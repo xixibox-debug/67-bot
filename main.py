@@ -1029,7 +1029,9 @@ async def tavily_search(query: str) -> str:
     except Exception as e:
         logger.error(f"[Tavily 執行錯誤]: {e}")
         return "搜尋時發生錯誤。"
-        
+
+
+@bot.event
 async def on_message(message: discord.Message):
     # 排除機器人自己的訊息與私訊
     if message.author.bot or not message.guild: 
@@ -1221,90 +1223,6 @@ async def on_message(message: discord.Message):
             try:
                 channel = message.guild.get_channel(int(lvl_row[0])) or await message.fetch_channel(int(lvl_row[0]))
                 if channel:
-                    announce_msg = parse_placeholders(lvl_row[1], message.author, message.guild, extra={"level": new_lvl})
-                    await channel.send(announce_msg)
-            except Exception as e:
-                logger.error(f"[發送升等訊息失敗]: {e}")
-
-    conn.close()
-
-    # =================================================================
-    # 🔒 1. 自動禁言黑名單檢查 (開啟單一資料庫連線)
-    # =================================================================
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    # 讀取自動禁言設定
-    cursor.execute("SELECT banned_word, duration_str FROM mutes WHERE guild_id = ?", (str(message.guild.id),))
-    banned_list = cursor.fetchall()
-    for word, dur in banned_list:
-        if word in message.content:
-            try:
-                await message.delete()
-                delta, _ = parse_mute_duration(dur)
-                await message.author.timeout(delta or datetime.timedelta(minutes=10), reason="Auto Mute Triggered")
-                
-                embed = discord.Embed(
-                    title="HAHAHA 😂", 
-                    color=0xff0000, 
-                    description=f'{message.author.name} has been muted for {dur} due to he/she sent the message "{message.content}", you can try and be the next!'
-                )
-                embed.set_footer(text=f"{message.guild.name} | 67")
-                await message.channel.send(embed=embed)
-                conn.close()
-                return # 違規直接結束，不給予經驗值
-            except Exception as e:
-                logger.error(f"[Auto Mute 錯誤]: {e}")
-                pass
-
-
-    # =================================================================
-    # 📈 3. 經驗值更新、升等檢查、身分組與通知發放
-    # =================================================================
-    uid = str(message.author.id)
-    gid = str(message.guild.id)
-    
-    # 讀取使用者當前的數據
-    cursor.execute("SELECT xp, level, count_67 FROM levels WHERE user_id = ?", (uid,))
-    row = cursor.fetchone()
-    xp, lvl, count_67 = row if row else (0, 1, 0)
-
-    # 經驗值加成計算
-    if occurrences > 0:
-        count_67 += occurrences
-        xp_gained = (occurrences * 20) + random.randint(15, 25)
-    else:
-        xp_gained = random.randint(15, 25)
-        
-    new_xp = xp + xp_gained
-    new_lvl = lvl
-    
-    # 判定是否為管理員
-    is_admin = message.author.guild_permissions.administrator if isinstance(message.author, discord.Member) else False
-    
-    # 透過傳入包含 is_admin 的 get_xp_needed 函式計算是否升等
-    while new_xp >= get_xp_needed(new_lvl, is_admin):
-        new_xp -= get_xp_needed(new_lvl, is_admin)
-        new_lvl += 1
-
-    # 將最終計算出的正確數據更新回資料庫
-    cursor.execute("INSERT OR REPLACE INTO levels (user_id, xp, level, count_67) VALUES (?, ?, ?, ?)", (uid, new_xp, new_lvl, count_67))
-    conn.commit()
-
-    # 🎯 核心功能：當等級發生變化時，依序補發身分組與自訂通知
-    if new_lvl > lvl:
-        # 依序補發這期間提升的所有等級身分組獎勵
-        for l in range(lvl + 1, new_lvl + 1):
-            await check_level_roles(message.author, l)
-            
-        # 讀取並發送自訂的升等訊息
-        cursor.execute("SELECT channel_id, message FROM levelup WHERE guild_id = ?", (gid,))
-        lvl_row = cursor.fetchone()
-        if lvl_row and lvl_row[0]:
-            try:
-                channel = message.guild.get_channel(int(lvl_row[0])) or await message.fetch_channel(int(lvl_row[0]))
-                if channel:
-                    # 使用標準的預設工具函式來解析豐富的變數
                     announce_msg = parse_placeholders(lvl_row[1], message.author, message.guild, extra={"level": new_lvl})
                     await channel.send(announce_msg)
             except Exception as e:
