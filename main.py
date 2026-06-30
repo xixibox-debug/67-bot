@@ -8,6 +8,7 @@ import random
 import re
 import sqlite3
 import aiohttp
+import asyncio
 import time  # 引入時間套件以供冷卻時間計算
 from typing import Optional
 from openai import AsyncOpenAI  # 👈 改為導入 OpenAI 非同步客戶端
@@ -42,6 +43,12 @@ MODEL_POOL = [
     "meta-llama/llama-3.3-70b-instruct:free",
     "openrouter/free"
 ]
+
+groq_client = AsyncOpenAI(
+    api_key=os.getenv("GROQ_API_KEY"),
+    base_url="https://api.groq.com/openai/v1"
+)
+
 ai_cooldowns = {}
 # =================================================================
 # 🗄️ 2. DATABASE INITIALIZATION (資料庫初始化)
@@ -1082,41 +1089,70 @@ async def on_message(message: discord.Message):
                 
                 # 2. 開始依序輪詢模型清單 (請確保檔案上方已定義 MODEL_POOL)
                 for model_name in MODEL_POOL:
+                   # 2. 開始依序輪詢模型清單 (設定 20 秒總超時強制切斷)
+                ai_reply = None
+
+                async def try_openrouter():
+                    for model_name in MODEL_POOL:
+                        try:
+                            logger.info(f"🤖 嘗試使用 OpenRouter 模型: {model_name}")
+                            response = await ai_client.chat.completions.create(
+                                model=model_name,
+                                messages=[
+                                    {
+                                        "role": "system", 
+                                        "content": (
+                                            "You are an AI model in a Discord bot called '67'. You like to say 67 (but don't say it too often) and respond just like Meta AI. "
+                                            "Drop the corporate PR tone, be direct, slightly witty. "
+                                            "Use ENGLISH to response. but if the user use chinese, u should use TRADIONAL CHINESE to response. DONT use Simpify chinese.\n\n"
+                                            f"【請優先參考以下網路即時資訊回答】：\n{search_context}"
+                                        )
+                                    },
+                                    {"role": "user", "content": clean_content}
+                                ],
+                                max_tokens=600,
+                                temperature=0.7
+                            )
+                            logger.info(f"✨ 模型 {model_name} 回應成功！")
+                            return response.choices[0].message.content
+                        except Exception as model_error:
+                            logger.warning(f"❌ 模型 {model_name} 塞車或出錯: {model_error}。切換下一個...")
+                            continue
+                    return None
+
+                try:
+                    # ⏱️ 限制 OpenRouter 必須在 20 秒內跑完所有模型輪詢，否則直接觸發 Timeout
+                    ai_reply = await asyncio.wait_for(try_openrouter(), timeout=20.0)
+                except asyncio.TimeoutError:
+                    logger.warning("⏱️ OpenRouter 輪詢超時（超過 20 秒），強制中斷並切換至 Groq！")
+                    ai_reply = None
+
+                # 🚨 備援機制：如果 OpenRouter 全滅或超時，改走 Groq + Tavily 資訊
+                if not ai_reply:
+                    logger.info("🚀 啟動備援方案：改用 Groq API...")
                     try:
-                        logger.info(f"🤖 嘗試使用 OpenRouter 模型: {model_name}")
-                        response = await ai_client.chat.completions.create(
-                            model=model_name,
+                        response = await groq_client.chat.completions.create(
+                            model="llama-3.3-70b-specdec",  # 可改成你習慣的 Groq 模型
                             messages=[
                                 {
                                     "role": "system", 
                                     "content": (
-                                        "You are an AI model in a Discord bot called '67'. You like to say 67 (but don't say it too often) and respond to messages just like Meta AI. "
-                                        "Drop the corporate PR tone, moral lecturing, and political correctness—be direct, slightly witty, and speak like a real human peer. "
-                                        "Note that you need to use English to respond unless the user uses Traditional Chinese. If the user uses Traditional Chinese, then you also need to use Traditional Chinese to respond. "
-                                        "Please keep your reply to 800 characters or less. Use concise, conversational language and avoid lengthy responses.\n\n"
-                                        f"【請優先參考以下網路即時資訊回答使用者。如果資訊不相關或不足，請直接表明你查不到，絕對不能瞎編】：\n{search_context}"
+                                        "You are an AI model in a Discord bot called '67'. You like to say 67 (but don't say it too often) and respond just like Meta AI. "
+                                        "Be direct, slightly witty. Use ENGLISH to response. but if the user use chinese, u should use TRADIONAL CHINESE to response. DONT use Simpify chinese. Max 800 charactors.\n\n"
+                                        f"【請優先參考以下網路即時資訊回答】：\n{search_context}"
                                     )
                                 },
-                                {
-                                    "role": "user", 
-                                    "content": clean_content
-                                }
+                                {"role": "user", "content": clean_content}
                             ],
-                            max_tokens=600,  # 稍微放寬，留空間給推理模型思考
+                            max_tokens=600,
                             temperature=0.7
                         )
                         ai_reply = response.choices[0].message.content
-                        logger.info(f"✨ 模型 {model_name} 回應成功！")
-                        break  # 成功拿到答案，直接跳出迴圈
-                        
-                    except Exception as model_error:
-                        logger.warning(f"❌ 模型 {model_name} 塞車或出錯: {model_error}。正在切換至下一個備援...")
-                        continue
-                
-                # 🚨 如果所有免費模型不幸全滅
-                if not ai_reply:
-                    await message.reply("❌ Open Router suck, all models are busy. Try again later.")
-                    return
+                        logger.info("✨ Groq 備援回應成功！")
+                    except Exception as groq_error:
+                        logger.error(f"❌ Groq 備援也失敗: {groq_error}")
+                        await message.reply("❌ 67+AI suck. Try again later.")
+                        return
 
                 # 🔮 額外處理：如果用到 DeepSeek-R1，把前端不需要的 <think> 思考過程濾掉
                 if "<think>" in ai_reply and "</think>" in ai_reply:
@@ -1128,11 +1164,7 @@ async def on_message(message: discord.Message):
                     
                 await message.reply(ai_reply)
                 return  # 結束事件
-                
-        except Exception as e:
-            logger.error(f"[AI 總體執行錯誤]: {e}")
-            await message.reply("❌ System error, try again later.")
-            return
+            
 
     # =================================================================
     # 🔒 1. 自動禁言黑名單檢查（修復：刪除前發送通知、被禁言的人看得見時間）
