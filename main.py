@@ -37,9 +37,9 @@ ai_client = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1"
 )
 MODEL_POOL = [
-    "deepseek/deepseek-r1:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
     "mistralai/mistral-small-3.1-24b-instruct:free",
+    "google/gemini-2.5-flash:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
     "openrouter/free"
 ]
 ai_cooldowns = {}
@@ -1120,7 +1120,6 @@ async def on_message(message: discord.Message):
 
                 # 🔮 額外處理：如果用到 DeepSeek-R1，把前端不需要的 <think> 思考過程濾掉
                 if "<think>" in ai_reply and "</think>" in ai_reply:
-                    import re
                     ai_reply = re.sub(r'<think>.*?</think>', '', ai_reply, flags=re.DOTALL).strip()
 
                 # 安全字數截斷
