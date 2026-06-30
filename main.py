@@ -42,6 +42,7 @@ MODEL_POOL = [
     "mistralai/mistral-small-3.1-24b-instruct:free",
     "openrouter/free"
 ]
+ai_cooldowns = {}
 # =================================================================
 # 🗄️ 2. DATABASE INITIALIZATION (資料庫初始化)
 # =================================================================
@@ -991,7 +992,6 @@ async def on_member_remove(member: discord.Member):
     except Exception as e: logger.error(f"[on_member_remove 崩潰]: {e}")
 
 
-@bot.event
 
 async def tavily_search(query: str) -> str:
     """使用 Tavily API 進行非同步聯網搜尋"""
