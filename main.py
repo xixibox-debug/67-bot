@@ -1083,49 +1083,44 @@ async def on_message(message: discord.Message):
         try:
             async with message.channel.typing():
                 # 1. 先呼叫 Tavily 進行非同步網路搜尋
-                search_context = await tavily_search(clean_content)
-                
-                ai_reply = None  # 用來儲存最終成功的回答
-                
-                # 2. 開始依序輪詢模型清單 (請確保檔案上方已定義 MODEL_POOL)
-                for model_name in MODEL_POOL:
-                   # 2. 開始依序輪詢模型清單 (設定 20 秒總超時強制切斷)
-                ai_reply = None
-
-                async def try_openrouter():
-                    for model_name in MODEL_POOL:
-                        try:
-                            logger.info(f"🤖 嘗試使用 OpenRouter 模型: {model_name}")
-                            response = await ai_client.chat.completions.create(
-                                model=model_name,
-                                messages=[
-                                    {
-                                        "role": "system", 
-                                        "content": (
-                                            "You are an AI model in a Discord bot called '67'. You like to say 67 (but don't say it too often) and respond just like Meta AI. "
-                                            "Drop the corporate PR tone, be direct, slightly witty. "
-                                            "Use ENGLISH to response. but if the user use chinese, u should use TRADIONAL CHINESE to response. DONT use Simpify chinese.\n\n"
-                                            f"【請優先參考以下網路即時資訊回答】：\n{search_context}"
-                                        )
-                                    },
-                                    {"role": "user", "content": clean_content}
-                                ],
-                                max_tokens=600,
-                                temperature=0.7
-                            )
-                            logger.info(f"✨ 模型 {model_name} 回應成功！")
-                            return response.choices[0].message.content
-                        except Exception as model_error:
-                            logger.warning(f"❌ 模型 {model_name} 塞車或出錯: {model_error}。切換下一個...")
-                            continue
-                    return None
-
-                try:
-                    # ⏱️ 限制 OpenRouter 必須在 20 秒內跑完所有模型輪詢，否則直接觸發 Timeout
-                    ai_reply = await asyncio.wait_for(try_openrouter(), timeout=20.0)
-                except asyncio.TimeoutError:
-                    logger.warning("⏱️ OpenRouter 輪詢超時（超過 20 秒），強制中斷並切換至 Groq！")
+                    search_context = await tavily_search(clean_content)
+                    
                     ai_reply = None
+
+                    async def try_openrouter():
+                        for model_name in MODEL_POOL:
+                            try:
+                                logger.info(f"🤖 嘗試使用 OpenRouter 模型: {model_name}")
+                                response = await ai_client.chat.completions.create(
+                                    model=model_name,
+                                    messages=[
+                                        {
+                                            "role": "system", 
+                                            "content": (
+                                                "You are an AI model in a Discord bot called '67'. You like to say 67 (but don't say it too often) and respond just like Meta AI. "
+                                                "Drop the corporate PR tone, be direct, slightly witty. "
+                                                "Use ENGLISH to response. but if the user use chinese, u should use TRADIONAL CHINESE to response. DONT use Simpify chinese.\n\n"
+                                                f"【請優先參考以下網路即時資訊回答】：\n{search_context}"
+                                            )
+                                        },
+                                        {"role": "user", "content": clean_content}
+                                    ],
+                                    max_tokens=600,
+                                    temperature=0.7
+                                )
+                                logger.info(f"✨ 模型 {model_name} 回應成功！")
+                                return response.choices[0].message.content
+                            except Exception as model_error:
+                                logger.warning(f"❌ 模型 {model_name} 塞車或出錯: {model_error}。切換下一個...")
+                                continue
+                        return None
+
+                    try:
+                        # ⏱️ 限制 OpenRouter 必須在 20 秒內跑完所有模型輪詢，否則直接觸發 Timeout
+                        ai_reply = await asyncio.wait_for(try_openrouter(), timeout=20.0)
+                    except asyncio.TimeoutError:
+                        logger.warning("⏱️ OpenRouter 輪詢超時（超過 20 秒），強制中斷並切換至 Groq！")
+                        ai_reply = None
 
                 # 🚨 備援機制：如果 OpenRouter 全滅或超時，改走 Groq + Tavily 資訊
                 if not ai_reply:
