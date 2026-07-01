@@ -1080,7 +1080,7 @@ async def on_message(message: discord.Message):
         ai_cooldowns[user_id] = current_time
 
 # 🚀 呼叫 OpenRouter AI (整合 Tavily 連網與多模型備援)
-try:
+                try:
                     async with message.channel.typing():
                         # 1. 先呼叫 Tavily 進行非同步網路搜尋
                         search_context = await tavily_search(clean_content)
@@ -1150,39 +1150,20 @@ try:
                                 return
 
                         # 🔮 額外處理：如果用到 DeepSeek-R1，把前端不需要的 <think> 思考過程濾掉
-                        if "<think>" in ai_reply and "</think>" in ai_reply:
+                        if ai_reply and "<think>" in ai_reply and "</think>" in ai_reply:
                             ai_reply = re.sub(r'<think>.*?</think>', '', ai_reply, flags=re.DOTALL).strip()
 
                         # 安全字數截斷
-                        if len(ai_reply) > 800:
+                        if ai_reply and len(ai_reply) > 800:
                             ai_reply = ai_reply[:797] + "..."
                             
-                        await message.reply(ai_reply)
+                        if ai_reply:
+                            await message.reply(ai_reply)
+                        else:
+                            await message.reply("❌ 67+AI 目前無法生成回應，請稍後再試。")
                         return  # 結束事件
                 except Exception as e:
                     logger.error(f"❌ 外層 AI 呼叫流程發生未知錯誤: {e}")
-
-                # 🔮 額外處理：如果用到 DeepSeek-R1，把前端不需要的 <think> 思考過程濾掉
-                if "<think>" in ai_reply and "</think>" in ai_reply:
-                    ai_reply = re.sub(r'<think>.*?</think>', '', ai_reply, flags=re.DOTALL).strip()
-
-                # 安全字數截斷
-                if len(ai_reply) > 800:
-                    ai_reply = ai_reply[:797] + "..."
-                    
-                await message.reply(ai_reply)
-                return  # 結束事件
-
-                # 🔮 額外處理：如果用到 DeepSeek-R1，把前端不需要的 <think> 思考過程濾掉
-                if "<think>" in ai_reply and "</think>" in ai_reply:
-                    ai_reply = re.sub(r'<think>.*?</think>', '', ai_reply, flags=re.DOTALL).strip()
-
-                # 安全字數截斷
-                if len(ai_reply) > 800:
-                    ai_reply = ai_reply[:797] + "..."
-                    
-                await message.reply(ai_reply)
-                return  # 結束事件
             
 
     # =================================================================
