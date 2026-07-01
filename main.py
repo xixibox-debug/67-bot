@@ -1038,7 +1038,7 @@ async def tavily_search(query: str) -> str:
         return "搜尋時發生錯誤。"
 
 
-@client.event  # 💡 如果你的機器人變數名稱是 bot，請改成 @bot.event
+@bot.event  # 🎯 已將 @client.event 修改為 @bot.event
 async def on_message_delete(message):
     """當使用者刪除（收回）訊息時，檢查是否有正在執行的 AI 任務，有則立即強制取消"""
     if 'active_ai_tasks' in globals() and message.id in globals()['active_ai_tasks']:
@@ -1069,7 +1069,6 @@ async def on_message(message: discord.Message):
             ]
             await message.reply(random.choice(annoyed_phrases))
             return
-
         # 狀況 B：後面有字 -> 限制檢查並呼叫 Groq
         word_count = len(clean_content.split())
         if word_count > 100:
