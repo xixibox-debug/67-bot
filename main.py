@@ -1127,7 +1127,7 @@ async def on_message(message: discord.Message):
                     logger.info("🚀 啟動備援方案：改用 Groq API...")
                     try:
                         response = await groq_client.chat.completions.create(
-                            model="llama-3.3-70b-specdec",  # 可改成你習慣的 Groq 模型
+                            model="deepseek-r1-distill-llama-70b",  # 可改成你習慣的 Groq 模型
                             messages=[
                                 {
                                     "role": "system", 
