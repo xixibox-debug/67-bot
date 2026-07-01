@@ -1069,6 +1069,7 @@ async def on_message(message: discord.Message):
             ]
             await message.reply(random.choice(annoyed_phrases))
             return
+
         # 狀況 B：後面有字 -> 限制檢查並呼叫 Groq
         word_count = len(clean_content.split())
         if word_count > 100:
@@ -1087,7 +1088,7 @@ async def on_message(message: discord.Message):
 
         ai_cooldowns[user_id] = current_time
 
-# 🚀 直接呼叫 Groq AI (整合 Tavily 連網、收回偵測、連續對話)
+        # 🚀 直接呼叫 Groq AI (整合 Tavily 連網、收回偵測、連續對話)
         if 'active_ai_tasks' not in globals():
             globals()['active_ai_tasks'] = {}
 
@@ -1105,7 +1106,7 @@ async def on_message(message: discord.Message):
                     try:
                         ref_msg = await message.channel.fetch_message(message.reference.message_id)
                         if ref_msg.author.id == bot.user.id:  
-                            # 移除舊回應底部的免責聲明（相容標準格式與 Discord 小字格式），避免干擾 AI 學習
+                            # 移除舊回應底部的免責聲明，避免干擾 AI 學習
                             past_clean = ref_msg.content.split("\n\n67+AI suck")[0].split("\n\n-# 67+AI suck")[0].strip()
                             conversation_history.append({"role": "assistant", "content": past_clean})
                             logger.info("💬 偵測到用戶回覆 AI 訊息，成功載入上一輪對話上下文！")
@@ -1141,10 +1142,10 @@ async def on_message(message: discord.Message):
                     logger.info("✨ Groq 回應成功！")
                 except Exception as groq_error:
                     logger.error(f"❌ Groq 呼叫失敗: {groq_error}")
-                    await message.reply("❌ 67+AI suck. Try again later.")
+                    await message.reply("❌ 67+AI suck. Try again later.\n\n-# 67+AI suck and frequently makes mistakes; please verify it yourself.")
                     return
 
-                # 安全字數截斷（保留空間給下方的免責聲明）
+                # 安全字數截斷
                 if ai_reply and len(ai_reply) > 700:
                     ai_reply = ai_reply[:697] + "..."
                     
@@ -1152,38 +1153,12 @@ async def on_message(message: discord.Message):
                     ai_reply = f"{ai_reply}\n\n-# 67+AI suck and frequently makes mistakes; please verify it yourself."
                     await message.reply(ai_reply)
                 else:
-                    await message.reply("❌ 67+AI suck. Try again later.")
+                    await message.reply("❌ 67+AI suck. Try again later.\n\n-# 67+AI suck and frequently makes mistakes; please verify it yourself.")
                 return  # 結束事件
 
         except asyncio.CancelledError:
             # 🎯 當使用者在 AI 回應前收回訊息，這裡會被精確捕獲
             logger.info(f"🛑 偵測到用戶收回訊息！已強制切斷 Groq AI 工作，並將計時器歸零。")
-            ai_cooldowns[user_id] = 0
-            raise  # 依 asyncio 規範重新拋出異常
-        except Exception as e:
-            logger.error(f"❌ 外層 AI 呼叫流程發生未知錯誤: {e}")
-        finally:
-            # 確保任務結束後從追蹤名單移除
-            if 'active_ai_tasks' in globals():
-                globals()['active_ai_tasks'].pop(message.id, None)
-                # 🔮 額外處理：如果用到 DeepSeek-R1，把前端不需要的 <think> 思考過程濾掉
-                if ai_reply and "<think>" in ai_reply and "</think>" in ai_reply:
-                    ai_reply = re.sub(r'<think>.*?</think>', '', ai_reply, flags=re.DOTALL).strip()
-
-                # 安全字數截斷（保留空間給下方的免責聲明）
-                if ai_reply and len(ai_reply) > 700:
-                    ai_reply = ai_reply[:697] + "..."
-                    
-                if ai_reply:
-                    ai_reply = f"{ai_reply}\n\n-# 67+AI suck and frequently makes mistakes; please verify it yourself."
-                    await message.reply(ai_reply)
-                else:
-                    await message.reply("❌ 67+AI suck. Try again later.")
-                return  # 結束事件
-
-        except asyncio.CancelledError:
-            # 🎯 當使用者在 AI 回應前收回訊息，這裡會被精確捕獲
-            logger.info(f"🛑 偵測到用戶收回訊息！已強制切斷 AI 工作，並將計時器歸零。")
             ai_cooldowns[user_id] = 0
             raise  # 依 asyncio 規範重新拋出異常
         except Exception as e:
