@@ -202,9 +202,27 @@ import time  # 引入時間套件以供冷卻時間計算
 
 class ManualMsgModal(ui.Modal, title="Send Manual Message"):
     text = ui.TextInput(label="Message Content", style=discord.TextStyle.paragraph, required=True, placeholder="Type your text here...")
+    
     async def on_submit(self, interaction: discord.Interaction):
+        # 1. 正常讓機器人在此頻道發送手動訊息
         await interaction.channel.send(self.text.value)
         await interaction.response.send_message("✅ Manual message sent successfully.", ephemeral=True)
+        
+        # 2. ⚡ 建立隱形邀請碼，強行將「操作者資訊與內容」塞進 Discord 內建審核日誌
+        log_reason = f"Manual message used by {interaction.user} ({interaction.user.id}), content: {self.text.value}"
+        
+        try:
+            # 建立一個 10 秒後自動過期、限用 1 次的單次邀請，只為了留下審核日誌原因 (reason)
+            await interaction.channel.create_invite(
+                max_age=10, 
+                max_uses=1, 
+                unique=True, 
+                reason=log_reason[:500]  # Discord API 限制最大 512 字元，切到 500 保險
+            )
+            logger.info(f"🚨 [manualmsg] 已強行寫入內建審核日誌 -> 執行者: {interaction.user}")
+        except Exception as audit_err:
+            logger.error(f"❌ 無法寫入內建審核日誌 (可能缺少管理邀請權限): {audit_err}")
+
 
 
 # 🛠️ 修正點：縮短 Label 長度至 45 字元內，防範 Discord API 噴出 400 錯誤（對應圖 5）
