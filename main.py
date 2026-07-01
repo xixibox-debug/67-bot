@@ -1038,6 +1038,15 @@ async def tavily_search(query: str) -> str:
         return "搜尋時發生錯誤。"
 
 
+@client.event  # 💡 如果你的機器人變數名稱是 bot，請改成 @bot.event
+async def on_message_delete(message):
+    """當使用者刪除（收回）訊息時，檢查是否有正在執行的 AI 任務，有則立即強制取消"""
+    if 'active_ai_tasks' in globals() and message.id in globals()['active_ai_tasks']:
+        task, user_id = globals()['active_ai_tasks'][message.id]
+        if not task.done():
+            task.cancel()
+            logger.info(f"⚡ 已成功發送取消訊號至訊息 ID {message.id} 的 AI 任務。")
+
 @bot.event
 async def on_message(message: discord.Message):
     # 排除機器人自己的訊息與私訊
@@ -1079,32 +1088,57 @@ async def on_message(message: discord.Message):
 
         ai_cooldowns[user_id] = current_time
 
-# 🚀 呼叫 OpenRouter AI (整合 Tavily 連網與多模型備援)
+# 🚀 呼叫 OpenRouter AI (整合 Tavily 連網、多模型備援、收回偵測、連續對話)
+        if 'active_ai_tasks' not in globals():
+            globals()['active_ai_tasks'] = {}
+
         try:
+            # 📌 紀錄當前協程任務與用戶 ID，以便收回訊息時可以即時中斷
+            globals()['active_ai_tasks'][message.id] = (asyncio.current_task(), user_id)
+
             async with message.channel.typing():
                 # 1. 先呼叫 Tavily 進行非同步網路搜尋
                 search_context = await tavily_search(clean_content)
                 
+                # 2. 檢查是否為「回覆 AI」的訊息，若是則載入上一輪上下文
+                conversation_history = []
+                if message.reference and message.reference.message_id:
+                    try:
+                        ref_msg = await message.channel.fetch_message(message.reference.message_id)
+                        # 💡 如果你的機器人變數名稱是 bot，請把 client.user.id 改成 bot.user.id
+                        if ref_msg.author.id == client.user.id:  
+                            # 移除舊回應底部的免責聲明，避免干擾 AI 學習
+                            past_clean = ref_msg.content.split("\n\n67+AI suck")[0].strip()
+                            conversation_history.append({"role": "assistant", "content": past_clean})
+                            logger.info("💬 偵測到用戶回覆 AI 訊息，成功載入上一輪對話上下文！")
+                    except Exception as ref_err:
+                        logger.warning(f"無法獲取回覆訊息內容: {ref_err}")
+
                 ai_reply = None
 
                 async def try_openrouter():
                     for model_name in MODEL_POOL:
                         try:
                             logger.info(f"🤖 嘗試使用 OpenRouter 模型: {model_name}")
+                            
+                            # 組合 System、歷史對話與本次提問
+                            api_messages = [
+                                {
+                                    "role": "system", 
+                                    "content": (
+                                        "You are an AI model in a Discord bot called '67'. You like to say 67 (but don't say it too often) and respond just like Meta AI. "
+                                        "Drop the corporate PR tone, be direct, slightly witty. "
+                                        "Use ENGLISH to response. but if the user use chinese, u should use TRADIONAL CHINESE to response. DONT use Simpify chinese.\n\n"
+                                        f"【請優先參考以下網路即時資訊回答】：\n{search_context}"
+                                    )
+                                }
+                            ]
+                            api_messages.extend(conversation_history)
+                            api_messages.append({"role": "user", "content": clean_content})
+
                             response = await ai_client.chat.completions.create(
                                 model=model_name,
-                                messages=[
-                                    {
-                                        "role": "system", 
-                                        "content": (
-                                            "You are an AI model in a Discord bot called '67'. You like to say 67 (but don't say it too often) and respond just like Meta AI. "
-                                            "Drop the corporate PR tone, be direct, slightly witty. "
-                                            "Use ENGLISH to response. but if the user use chinese, u should use TRADIONAL CHINESE to response. DONT use Simpify chinese.\n\n"
-                                            f"【請優先參考以下網路即時資訊回答】：\n{search_context}"
-                                        )
-                                    },
-                                    {"role": "user", "content": clean_content}
-                                ],
+                                messages=api_messages,
                                 max_tokens=600,
                                 temperature=0.7
                             )
@@ -1126,19 +1160,22 @@ async def on_message(message: discord.Message):
                 if not ai_reply:
                     logger.info("🚀 啟動備援方案：改用 Groq API...")
                     try:
+                        groq_messages = [
+                            {
+                                "role": "system", 
+                                "content": (
+                                    "You are an AI model in a Discord bot called '67'. You like to say 67 (but don't say it too often) and respond just like Meta AI. "
+                                    "Be direct, slightly witty. Use ENGLISH to response. but if the user use chinese, u should use TRADIONAL CHINESE to response. DONT use Simpify chinese. Max 800 charactors.\n\n"
+                                    f"【請優先參考以下網路即時資訊回答】：\n{search_context}"
+                                )
+                            }
+                        ]
+                        groq_messages.extend(conversation_history)
+                        groq_messages.append({"role": "user", "content": clean_content})
+
                         response = await groq_client.chat.completions.create(
-                            model="llama-3.3-70b-versatile",  # 可改成你習慣的 Groq 模型
-                            messages=[
-                                {
-                                    "role": "system", 
-                                    "content": (
-                                        "You are an AI model in a Discord bot called '67'. You like to say 67 (but don't say it too often) and respond just like Meta AI. "
-                                        "Be direct, slightly witty. Use ENGLISH to response. but if the user use chinese, u should use TRADIONAL CHINESE to response. DONT use Simpify chinese. Max 800 charactors.\n\n"
-                                        f"【請優先參考以下網路即時資訊回答】：\n{search_context}"
-                                    )
-                                },
-                                {"role": "user", "content": clean_content}
-                            ],
+                            model="llama-3.3-70b-versatile",
+                            messages=groq_messages,
                             max_tokens=600,
                             temperature=0.7
                         )
@@ -1153,17 +1190,28 @@ async def on_message(message: discord.Message):
                 if ai_reply and "<think>" in ai_reply and "</think>" in ai_reply:
                     ai_reply = re.sub(r'<think>.*?</think>', '', ai_reply, flags=re.DOTALL).strip()
 
-                # 安全字數截斷
-                if ai_reply and len(ai_reply) > 800:
-                    ai_reply = ai_reply[:797] + "..."
+                # 安全字數截斷（保留空間給下方的免責聲明）
+                if ai_reply and len(ai_reply) > 700:
+                    ai_reply = ai_reply[:697] + "..."
                     
                 if ai_reply:
+                    ai_reply = f"{ai_reply}\n\n-# 67+AI suck and frequently makes mistakes; please verify it yourself."
                     await message.reply(ai_reply)
                 else:
-                    await message.reply("❌ 67+AI 目前無法生成回應，請稍後再試。")
+                    await message.reply("❌ 67+AI suck. Try again later.")
                 return  # 結束事件
+
+        except asyncio.CancelledError:
+            # 🎯 當使用者在 AI 回應前收回訊息，這裡會被精確捕獲
+            logger.info(f"🛑 偵測到用戶收回訊息！已強制切斷 AI 工作，並將計時器歸零。")
+            ai_cooldowns[user_id] = 0
+            raise  # 依 asyncio 規範重新拋出異常
         except Exception as e:
             logger.error(f"❌ 外層 AI 呼叫流程發生未知錯誤: {e}")
+        finally:
+            # 確保任務結束後從追蹤名單移除
+            if 'active_ai_tasks' in globals():
+                globals()['active_ai_tasks'].pop(message.id, None)
             
 
     # =================================================================
