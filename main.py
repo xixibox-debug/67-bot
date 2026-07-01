@@ -1087,7 +1087,7 @@ async def on_message(message: discord.Message):
 
         ai_cooldowns[user_id] = current_time
 
-# 🚀 呼叫 OpenRouter AI (整合 Tavily 連網、多模型備援、收回偵測、連續對話)
+# 🚀 直接呼叫 Groq AI (整合 Tavily 連網、收回偵測、連續對話)
         if 'active_ai_tasks' not in globals():
             globals()['active_ai_tasks'] = {}
 
@@ -1104,87 +1104,68 @@ async def on_message(message: discord.Message):
                 if message.reference and message.reference.message_id:
                     try:
                         ref_msg = await message.channel.fetch_message(message.reference.message_id)
-                        # 💡 如果你的機器人變數名稱是 bot，請把 client.user.id 改成 bot.user.id
-                        if ref_msg.author.id == client.user.id:  
-                            # 移除舊回應底部的免責聲明，避免干擾 AI 學習
-                            past_clean = ref_msg.content.split("\n\n67+AI suck")[0].strip()
+                        if ref_msg.author.id == bot.user.id:  
+                            # 移除舊回應底部的免責聲明（相容標準格式與 Discord 小字格式），避免干擾 AI 學習
+                            past_clean = ref_msg.content.split("\n\n67+AI suck")[0].split("\n\n-# 67+AI suck")[0].strip()
                             conversation_history.append({"role": "assistant", "content": past_clean})
                             logger.info("💬 偵測到用戶回覆 AI 訊息，成功載入上一輪對話上下文！")
                     except Exception as ref_err:
                         logger.warning(f"無法獲取回覆訊息內容: {ref_err}")
 
-                ai_reply = None
-
-                async def try_openrouter():
-                    for model_name in MODEL_POOL:
-                        try:
-                            logger.info(f"🤖 嘗試使用 OpenRouter 模型: {model_name}")
-                            
-                            # 組合 System、歷史對話與本次提問
-                            api_messages = [
-                                {
-                                    "role": "system", 
-                                    "content": (
-                                        "You are an AI model in a Discord bot called '67'. You like to say 67 (but don't say it too often) and respond just like Meta AI. "
-                                        "Drop the corporate PR tone, be direct, slightly witty. "
-                                        "Use ENGLISH to response. but if the user use chinese, u should use TRADIONAL CHINESE to response. DONT use Simpify chinese.\n\n"
-                                        f"【請優先參考以下網路即時資訊回答】：\n{search_context}"
-                                    )
-                                }
-                            ]
-                            api_messages.extend(conversation_history)
-                            api_messages.append({"role": "user", "content": clean_content})
-
-                            response = await ai_client.chat.completions.create(
-                                model=model_name,
-                                messages=api_messages,
-                                max_tokens=600,
-                                temperature=0.7
-                            )
-                            logger.info(f"✨ 模型 {model_name} 回應成功！")
-                            return response.choices[0].message.content
-                        except Exception as model_error:
-                            logger.warning(f"❌ 模型 {model_name} 塞車或出錯: {model_error}。切換下一個...")
-                            continue
-                    return None
-
-                try:
-                    # ⏱️ 限制 OpenRouter 必須在 20 秒內跑完所有模型輪詢，否則直接觸發 Timeout
-                    ai_reply = await asyncio.wait_for(try_openrouter(), timeout=20.0)
-                except asyncio.TimeoutError:
-                    logger.warning("⏱️ OpenRouter 輪詢超時（超過 20 秒），強制中斷並切換至 Groq！")
-                    ai_reply = None
-
-                # 🚨 備援機制：如果 OpenRouter 全滅或超時，改走 Groq + Tavily 資訊
-                if not ai_reply:
-                    logger.info("🚀 啟動備援方案：改用 Groq API...")
-                    try:
-                        groq_messages = [
-                            {
-                                "role": "system", 
-                                "content": (
-                                    "You are an AI model in a Discord bot called '67'. You like to say 67 (but don't say it too often) and respond just like Meta AI. "
-                                    "Be direct, slightly witty. Use ENGLISH to response. but if the user use chinese, u should use TRADIONAL CHINESE to response. DONT use Simpify chinese. Max 800 charactors.\n\n"
-                                    f"【請優先參考以下網路即時資訊回答】：\n{search_context}"
-                                )
-                            }
-                        ]
-                        groq_messages.extend(conversation_history)
-                        groq_messages.append({"role": "user", "content": clean_content})
-
-                        response = await groq_client.chat.completions.create(
-                            model="llama-3.3-70b-versatile",
-                            messages=groq_messages,
-                            max_tokens=600,
-                            temperature=0.7
+                # 3. 組合 System、歷史對話與本次提問，直接送給 Groq
+                groq_messages = [
+                    {
+                        "role": "system", 
+                        "content": (
+                            "You are an AI model in a Discord bot called '67'. You like to say 67 (but don't say it too often) and respond just like Meta AI. "
+                            "Drop the corporate PR tone, be direct, slightly witty. "
+                            "Use ENGLISH to response. but if the user use chinese, u should use TRADIONAL CHINESE to response. DONT use Simpify chinese. Max 800 characters.\n\n"
+                            f"【請優先參考以下網路即時資訊回答】：\n{search_context}"
                         )
-                        ai_reply = response.choices[0].message.content
-                        logger.info("✨ Groq 備援回應成功！")
-                    except Exception as groq_error:
-                        logger.error(f"❌ Groq 備援也失敗: {groq_error}")
-                        await message.reply("❌ 67+AI suck. Try again later.")
-                        return
+                    }
+                ]
+                groq_messages.extend(conversation_history)
+                groq_messages.append({"role": "user", "content": clean_content})
 
+                logger.info("🤖 正在直接請求 Groq API (llama-3.3-70b-versatile)...")
+                ai_reply = None
+                
+                try:
+                    response = await groq_client.chat.completions.create(
+                        model="llama-3.3-70b-versatile",
+                        messages=groq_messages,
+                        max_tokens=600,
+                        temperature=0.7
+                    )
+                    ai_reply = response.choices[0].message.content
+                    logger.info("✨ Groq 回應成功！")
+                except Exception as groq_error:
+                    logger.error(f"❌ Groq 呼叫失敗: {groq_error}")
+                    await message.reply("❌ 67+AI suck. Try again later.")
+                    return
+
+                # 安全字數截斷（保留空間給下方的免責聲明）
+                if ai_reply and len(ai_reply) > 700:
+                    ai_reply = ai_reply[:697] + "..."
+                    
+                if ai_reply:
+                    ai_reply = f"{ai_reply}\n\n-# 67+AI suck and frequently makes mistakes; please verify it yourself."
+                    await message.reply(ai_reply)
+                else:
+                    await message.reply("❌ 67+AI suck. Try again later.")
+                return  # 結束事件
+
+        except asyncio.CancelledError:
+            # 🎯 當使用者在 AI 回應前收回訊息，這裡會被精確捕獲
+            logger.info(f"🛑 偵測到用戶收回訊息！已強制切斷 Groq AI 工作，並將計時器歸零。")
+            ai_cooldowns[user_id] = 0
+            raise  # 依 asyncio 規範重新拋出異常
+        except Exception as e:
+            logger.error(f"❌ 外層 AI 呼叫流程發生未知錯誤: {e}")
+        finally:
+            # 確保任務結束後從追蹤名單移除
+            if 'active_ai_tasks' in globals():
+                globals()['active_ai_tasks'].pop(message.id, None)
                 # 🔮 額外處理：如果用到 DeepSeek-R1，把前端不需要的 <think> 思考過程濾掉
                 if ai_reply and "<think>" in ai_reply and "</think>" in ai_reply:
                     ai_reply = re.sub(r'<think>.*?</think>', '', ai_reply, flags=re.DOTALL).strip()
