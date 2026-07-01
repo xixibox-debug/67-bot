@@ -1089,6 +1089,7 @@ async def on_message(message: discord.Message):
         ai_cooldowns[user_id] = current_time
 
         # 🚀 直接呼叫 Groq AI (整合 Tavily 連網、收回偵測、連續對話)
+
         if 'active_ai_tasks' not in globals():
             globals()['active_ai_tasks'] = {}
 
@@ -1097,11 +1098,11 @@ async def on_message(message: discord.Message):
             globals()['active_ai_tasks'][message.id] = (asyncio.current_task(), user_id)
 
             async with message.channel.typing():
-                # 1. 先呼叫 Tavily 進行非同步網路搜尋
-                search_context = await tavily_search(clean_content)
                 
-                # 2. 檢查是否為「回覆 AI」的訊息，若是則載入上一輪上下文
+                # 1. 【順序對調】先檢查是否為「回覆 AI」的訊息，並載入上一輪上下文
                 conversation_history = []
+                search_query = clean_content  # 預設搜尋當前內容
+                
                 if message.reference and message.reference.message_id:
                     try:
                         ref_msg = await message.channel.fetch_message(message.reference.message_id)
@@ -1110,8 +1111,19 @@ async def on_message(message: discord.Message):
                             past_clean = ref_msg.content.split("\n\n67+AI suck")[0].split("\n\n-# 67+AI suck")[0].strip()
                             conversation_history.append({"role": "assistant", "content": past_clean})
                             logger.info("💬 偵測到用戶回覆 AI 訊息，成功載入上一輪對話上下文！")
+                            
+                            # 💡 🧠 智慧脈絡搜尋（核心修復）：
+                            # 如果使用者回覆的字數很短（小於等於 10 個字），通常是短句質疑或追問。
+                            # 我們把機器人上一句說過的話（前 30 個字）切下來，當作背景關鍵字一起拿去搜尋！
+                            if len(clean_content) <= 10:
+                                bg_keywords = re.sub(r'[#\*`>-]', '', past_clean)[:30].strip()
+                                search_query = f"{bg_keywords} {clean_content}"
+                                logger.info(f"🔍 觸發脈絡搜尋，優化後的關鍵字: {search_query}")
                     except Exception as ref_err:
                         logger.warning(f"無法獲取回覆訊息內容: {ref_err}")
+
+                # 2. 呼叫 Tavily 進行非同步網路搜尋（這時候 search_query 已經被優化過了）
+                search_context = await tavily_search(search_query)
 
                 # 3. 組合 System、歷史對話與本次提問，直接送給 Groq
                 groq_messages = [
@@ -1129,6 +1141,7 @@ async def on_message(message: discord.Message):
                 groq_messages.append({"role": "user", "content": clean_content})
 
                 logger.info("🤖 正在直接請求 Groq API (llama-3.3-70b-versatile)...")
+                # (下方維持原樣，接續原本的 groq_client.chat.completions.create 即可...)
                 ai_reply = None
                 
                 try:
