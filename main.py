@@ -1090,6 +1090,7 @@ async def on_message(message: discord.Message):
 
         # 🚀 直接呼叫 Groq AI (整合 Tavily 連網、收回偵測、連續對話)
 
+# 🚀 直接呼叫 Groq AI (整合 Tavily 連網、收回偵測、連續對話)
         if 'active_ai_tasks' not in globals():
             globals()['active_ai_tasks'] = {}
 
@@ -1099,9 +1100,9 @@ async def on_message(message: discord.Message):
 
             async with message.channel.typing():
                 
-                # 1. 【順序對調】先檢查是否為「回覆 AI」的訊息，並載入上一輪上下文
+                # 1. 先檢查是否為「回覆 AI」的訊息，並載入歷史紀錄與優化搜尋關鍵字
                 conversation_history = []
-                search_query = clean_content  # 預設搜尋當前內容
+                search_query = clean_content  # 預設搜尋當前用戶輸入的內容
                 
                 if message.reference and message.reference.message_id:
                     try:
@@ -1112,17 +1113,30 @@ async def on_message(message: discord.Message):
                             conversation_history.append({"role": "assistant", "content": past_clean})
                             logger.info("💬 偵測到用戶回覆 AI 訊息，成功載入上一輪對話上下文！")
                             
-                            # 💡 🧠 智慧脈絡搜尋（核心修復）：
-                            # 如果使用者回覆的字數很短（小於等於 10 個字），通常是短句質疑或追問。
-                            # 我們把機器人上一句說過的話（前 30 個字）切下來，當作背景關鍵字一起拿去搜尋！
-                            if len(clean_content) <= 10:
-                                bg_keywords = re.sub(r'[#\*`>-]', '', past_clean)[:30].strip()
+                            # 🚀 【深度脈絡追蹤】無條件追溯第二層：機器人上一句是在回答哪一個「源頭提問」
+                            root_context = ""
+                            if ref_msg.reference and ref_msg.reference.message_id:
+                                try:
+                                    orig_msg = await message.channel.fetch_message(ref_msg.reference.message_id)
+                                    root_context = orig_msg.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
+                                    logger.info(f"🔍 成功追溯到對話源頭主題: {root_context}")
+                                except Exception as orig_err:
+                                    logger.warning(f"無法獲取源源頭訊息內容: {orig_err}")
+                            
+                            # 🧠 無條件組合搜尋詞（不設任何字數門檻）
+                            if root_context:
+                                # 有最原始提問，就將「源頭提問 + 當前追問」綁在一起搜尋
+                                search_query = f"{root_context} {clean_content}"
+                            else:
+                                # 沒有原始提問（例如中途插進來回覆），就直接把機器人上一句跟當前輸入綁在一起
+                                bg_keywords = re.sub(r'[#\*`>-]', '', past_clean).strip()
                                 search_query = f"{bg_keywords} {clean_content}"
-                                logger.info(f"🔍 觸發脈絡搜尋，優化後的關鍵字: {search_query}")
+                                
+                            logger.info(f"🔍 最終優化交給 Tavily 的關鍵字: {search_query}")
                     except Exception as ref_err:
                         logger.warning(f"無法獲取回覆訊息內容: {ref_err}")
 
-                # 2. 呼叫 Tavily 進行非同步網路搜尋（這時候 search_query 已經被優化過了）
+                # 2. 呼叫 Tavily 進行非同步網路搜尋
                 search_context = await tavily_search(search_query)
 
                 # 3. 組合 System、歷史對話與本次提問，直接送給 Groq
@@ -1141,7 +1155,6 @@ async def on_message(message: discord.Message):
                 groq_messages.append({"role": "user", "content": clean_content})
 
                 logger.info("🤖 正在直接請求 Groq API (llama-3.3-70b-versatile)...")
-                # (下方維持原樣，接續原本的 groq_client.chat.completions.create 即可...)
                 ai_reply = None
                 
                 try:
@@ -1170,14 +1183,12 @@ async def on_message(message: discord.Message):
                 return  # 結束事件
 
         except asyncio.CancelledError:
-            # 🎯 當使用者在 AI 回應前收回訊息，這裡會被精確捕獲
-            logger.info(f"🛑 偵測到用戶收回訊息！已強制切斷 Groq AI 工作，並將計時器歸零。")
+            logger.info(f"🛑 偵測到用戶收回訊息！已強制切換 Groq AI 工作，並將計時器歸零。")
             ai_cooldowns[user_id] = 0
-            raise  # 依 asyncio 規範重新拋出異常
+            raise  
         except Exception as e:
             logger.error(f"❌ 外層 AI 呼叫流程發生未知錯誤: {e}")
         finally:
-            # 確保任務結束後從追蹤名單移除
             if 'active_ai_tasks' in globals():
                 globals()['active_ai_tasks'].pop(message.id, None)
             
