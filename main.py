@@ -198,28 +198,76 @@ import time  # 引入時間套件以供冷卻時間計算
 # 🖥️ 5. INTERACTIVE UI (MODALS & VIEWS)
 # =================================================================
 
-class ManualMsgModal(ui.Modal, title="Send Manual Message"):
-    text = ui.TextInput(label="Message Content", style=discord.TextStyle.paragraph, required=True, placeholder="Type your text here...")
+class ManualMsgModal(ui.Modal, title="手動發送訊息設定"):
+    # 欄位 1：訊息主要內容
+    msg_content = ui.TextInput(
+        label="Message content",
+        style=discord.TextStyle.paragraph,
+        placeholder="Enter content",
+        required=True
+    )
     
+    # 欄位 2：回覆訊息 ID (選填)
+    reply_id = ui.TextInput(
+        label="Reply message ID ",
+        style=discord.TextStyle.short,
+        placeholder="Enter the message ID to reply if u want",
+        required=False
+    )
+
+    # 初始化時將第一層選好的 fake_ai 狀態傳進來
+    def __init__(self, fake_ai: bool):
+        super().__init__()
+        self.fake_ai = fake_ai
+
     async def on_submit(self, interaction: discord.Interaction):
-        # 1. 正常讓機器人在此頻道發送手動訊息
-        await interaction.channel.send(self.text.value)
-        await interaction.response.send_message("✅ Manual message sent successfully.", ephemeral=True)
+        # 1. 取得訊息內容
+        content = self.msg_content.value
         
-        # 2. ⚡ 建立隱形邀請碼，強行將「操作者資訊與內容」塞進 Discord 內建審核日誌
-        log_reason = f"Manual message used by {interaction.user} ({interaction.user.id}), content: {self.text.value}"
-        
-        try:
-            # 建立一個 10 秒後自動過期、限用 1 次的單次邀請，只為了留下審核日誌原因 (reason)
-            await interaction.channel.create_invite(
-                max_age=10, 
-                max_uses=1, 
-                unique=True, 
-                reason=log_reason[:500]  # Discord API 限制最大 512 字元，切到 500 保險
-            )
-            logger.info(f"🚨 [manualmsg] 已強行寫入內建審核日誌 -> 執行者: {interaction.user}")
-        except Exception as audit_err:
-            logger.error(f"❌ 無法寫入內建審核日誌 (可能缺少管理邀請權限): {audit_err}")
+        # 2. 檢查是否要偽裝成 AI (如果前面的 fake-ai 選擇了 True)
+        if self.fake_ai:
+            content += "\n\n-# 67+AI suck and frequently makes mistakes; please verify it yourself."
+
+        # 先延遲交互回應，避免後續抓取或發送訊息時卡住導致 Token 超時
+        await interaction.response.send_message("⏳ Sending...", ephemeral=True)
+
+        channel = interaction.channel
+        reply_id_str = self.reply_id.value.strip()
+
+        # 3. 判斷是「回覆訊息」還是「直接發送」
+        if reply_id_str:
+            try:
+                target_id = int(reply_id_str)
+                # 嘗試在當前頻道抓取該則要回覆的訊息
+                target_msg = await channel.fetch_message(target_id)
+                
+                # 執行回覆
+                await target_msg.reply(content)
+                await interaction.edit_original_response(content="✅ Replied!")
+                
+                # ⚡ 建立隱形邀請碼以寫入內建審核日誌
+                log_reason = f"Manual reply used by {interaction.user} ({interaction.user.id}), to msg: {target_id}"
+                await interaction.channel.create_invite(max_age=10, max_uses=1, unique=True, reason=log_reason[:500])
+                logger.info(f"👤 管理員 {interaction.user} 使用 /manualmsg 成功回覆了訊息 {target_id} (AI浮水印: {self.fake_ai})")
+                
+            except ValueError:
+                await interaction.edit_original_response(content="❌ 錯誤：Reply message ID 必須全部為數字！")
+            except discord.NotFound:
+                await interaction.edit_original_response(content="❌ 錯誤：在此頻道中找不到該 ID 的訊息（可能已被刪除）。")
+            except Exception as e:
+                await interaction.edit_original_response(content=f"❌ 錯誤：回覆失敗，原因: {e}")
+        else:
+            # 直接發送新訊息
+            try:
+                await channel.send(content)
+                await interaction.edit_original_response(content="✅ 訊息已成功直接發送到頻道！")
+                
+                # ⚡ 建立隱形邀請碼以寫入內建審核日誌
+                log_reason = f"Manual message used by {interaction.user} ({interaction.user.id}), content: {content[:100]}"
+                await interaction.channel.create_invite(max_age=10, max_uses=1, unique=True, reason=log_reason[:500])
+                logger.info(f"👤 {interaction.user} 使用 /manualmsg 直接發送了訊息 (AI浮水印: {self.fake_ai})")
+            except Exception as e:
+                await interaction.edit_original_response(content=f"❌ 錯誤：無法發送訊息，原因: {e}")
 
 
 
@@ -525,9 +573,13 @@ async def settings(interaction: discord.Interaction):
     embed.set_footer(text=f"{interaction.guild.name} | 67")
     await interaction.response.send_message(embed=embed, view=SettingsView())
 
-@bot.tree.command(name="manualmsg", description="Send manual text message as bot")
-async def manualmsg(interaction: discord.Interaction): await interaction.response.send_modal(ManualMsgModal())
-
+@bot.tree.command(name="manualmsg", description="管理員手動發送訊息（可模擬 AI 或回覆訊息）")
+@app_commands.rename(fake_ai="fake-ai")  # 👈 讓參數在 Discord 面板上顯示為 fake-ai
+@app_commands.describe(fake_ai="Add 67+AI Watermark? (True=On / False=Off)")
+async def manualmsg(interaction: discord.Interaction, fake_ai: bool = False):
+    # 呼叫上方設計好的新版 Modal，並把 fake_ai 參數帶進去
+    await interaction.response.send_modal(ManualMsgModal(fake_ai=fake_ai))
+    
 # 🛠️ 修正點：對應圖 2 之 Mute 嵌入卡片（綠色邊框 + 變數渲染）
 @bot.tree.command(name="mute", description="Timeout a server member")
 @app_commands.checks.has_permissions(moderate_members=True)
