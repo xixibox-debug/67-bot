@@ -1189,9 +1189,9 @@ async def on_message(message: discord.Message):
                 # ───【第一防線：直連 Google Gemini API】───
                 if os.getenv("GEMINI_API_KEY") and not ai_reply:
                     try:
-                        logger.info("🤖 [1/2] 優先請求直連 Gemini API (gemini-1.5-flash)...")
+                        logger.info("🤖 [1/2] 優先請求直連 Gemini API (gemini-2.5-flash)...")
                         gemini_response = await gemini_client.chat.completions.create(
-                            model="gemini-1.5-flash", 
+                            model="gemini-2.5-flash", 
                             messages=ai_messages,
                             max_tokens=600,
                             temperature=0.7
