@@ -1243,7 +1243,7 @@ async def on_message(message: discord.Message):
                     try:
                         logger.info("🤖 [1/2] 優先請求直連 Gemini API (gemini-2.5-flash)...")
                         gemini_response = await gemini_client.chat.completions.create(
-                            model="gemini-3.5-flash", 
+                            model="gemini-2.5-flash", 
                             messages=ai_messages,
                             # max_tokens=600,
                             temperature=0.7
