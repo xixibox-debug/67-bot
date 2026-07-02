@@ -46,6 +46,7 @@ groq_client = AsyncOpenAI(
     api_key=os.getenv("GROQ_API_KEY"),
     base_url="https://api.groq.com/openai/v1"
 )
+ai_cooldowns = {}
 
 # =================================================================
 # 🗄️ 2. DATABASE INITIALIZATION (資料庫初始化)
