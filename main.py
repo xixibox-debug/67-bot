@@ -1245,7 +1245,7 @@ async def on_message(message: discord.Message):
                         gemini_response = await gemini_client.chat.completions.create(
                             model="gemini-2.5-flash", 
                             messages=ai_messages,
-                            max_tokens=600,
+                            # max_tokens=600,
                             temperature=0.7
                         )
                         ai_reply = gemini_response.choices[0].message.content
