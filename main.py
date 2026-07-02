@@ -32,33 +32,20 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("SixSevenBot")
 
 # =================================================================
-# 🤖 AI 用戶端初始化 (新增 Gemini 直連與三階備援設定)
+# 🤖 AI 用戶端初始化 (保留 Gemini 直連與 Groq 備援設定)
 # =================================================================
 
-# 1. OpenRouter 客戶端與免費池 (移除了無用項目，並將大容量模型前移)
-ai_client = AsyncOpenAI(
-    api_key=os.getenv("OPENROUTER_API_KEY"),
-    base_url="https://openrouter.ai/api/v1"
-)
-MODEL_POOL = [
-    "google/gemini-2.5-flash:free",                  # 👈 移至第一順位，抗 429 能力最強
-    "mistralai/mistral-small-3.1-24b-instruct:free",
-    "meta-llama/llama-3.3-70b-instruct:free"
-]
-
-# 2. Groq 客戶端 (作為終極防線)
-groq_client = AsyncOpenAI(
-    api_key=os.getenv("GROQ_API_KEY"),
-    base_url="https://api.groq.com/openai/v1"
-)
-
-# 3. ✨ 新增：直連 Google Gemini 客戶端 (利用 OpenAI 相容端點語法)
+# 1. ✨ 直連 Google Gemini 客戶端 (利用 OpenAI 相容端點語法)
 gemini_client = AsyncOpenAI(
     api_key=os.getenv("GEMINI_API_KEY"),
     base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
 )
 
-ai_cooldowns = {}
+# 2. Groq 客戶端 (作為最終防線)
+groq_client = AsyncOpenAI(
+    api_key=os.getenv("GROQ_API_KEY"),
+    base_url="https://api.groq.com/openai/v1"
+)
 
 # =================================================================
 # 🗄️ 2. DATABASE INITIALIZATION (資料庫初始化)
@@ -1116,7 +1103,7 @@ async def on_message(message: discord.Message):
 
         ai_cooldowns[user_id] = current_time
 
-# 🚀 直接呼叫 AI (整合 10層/10分鐘連貫回溯、Tavily 連網、收回偵測、三級 API 備援)
+# 🚀 直接呼叫 AI (整合 10層/10分鐘連貫回溯、Tavily 連網、收回偵測、雙級 API 備援)
         if 'active_ai_tasks' not in globals():
             globals()['active_ai_tasks'] = {}
 
@@ -1195,13 +1182,13 @@ async def on_message(message: discord.Message):
                 ai_reply = None
                 
                 # ===========================================================
-                # 🛡️ ⚔️ 三陣營火線防禦機制 (Gemini 直連 -> OpenRouter -> Groq)
+                # 🛡️ ⚔️ 雙陣營火線防禦機制 (Gemini 直連 -> Groq 備援)
                 # ===========================================================
                 
                 # ───【第一防線：直連 Google Gemini API】───
                 if os.getenv("GEMINI_API_KEY") and not ai_reply:
                     try:
-                        logger.info("🤖 [1/3] 優先請求直連 Gemini API (gemini-1.5-flash)...")
+                        logger.info("🤖 [1/2] 優先請求直連 Gemini API (gemini-1.5-flash)...")
                         gemini_response = await gemini_client.chat.completions.create(
                             model="gemini-1.5-flash", 
                             messages=ai_messages,
@@ -1212,32 +1199,12 @@ async def on_message(message: discord.Message):
                         if ai_reply:
                             logger.info("✨ [第一防線] 直連 Gemini 成功救援故事！")
                     except Exception as gemini_err:
-                        logger.warning(f"⚠️ [第一防線] Gemini 直連失敗: {gemini_err}，準備切換至 OpenRouter...")
+                        logger.warning(f"⚠️ [第一防線] Gemini 直連失敗: {gemini_err}，準備切換至 Groq...")
 
-                # ───【第二防線：OpenRouter 免費模型池】───
-                if not ai_reply:
-                    logger.info("🤖 [2/3] 前方失敗，正在啟動 OpenRouter 免費池輪詢...")
-                    for model_name in MODEL_POOL:
-                        try:
-                            logger.info(f"🔄 嘗試呼叫 OpenRouter 模型: {model_name}")
-                            router_response = await ai_client.chat.completions.create(
-                                model=model_name,
-                                messages=ai_messages,
-                                max_tokens=500,
-                                temperature=0.7
-                            )
-                            ai_reply = router_response.choices[0].message.content
-                            if ai_reply:
-                                logger.info(f"✨ [第二防線] OpenRouter [{model_name}] 救場成功！")
-                                break
-                        except Exception as pool_err:
-                            logger.error(f"❌ OpenRouter 模型 [{model_name}] 遭遇錯誤/429: {pool_err}，嘗試下一個...")
-                            continue
-
-                # ───【第三防線：Groq API 終極墊底】───
+                # ───【第二防線：Groq API 終極墊底】───
                 if not ai_reply:
                     try:
-                        logger.info("🤖 [3/3] 前方全滅！觸發最終底線，請求 Groq API (llama-3.3-70b-versatile)...")
+                        logger.info("🤖 [2/2] 前方失敗！觸發最終底線，請求 Groq API (llama-3.3-70b-versatile)...")
                         groq_response = await groq_client.chat.completions.create(
                             model="llama-3.3-70b-versatile",
                             messages=ai_messages,
@@ -1246,13 +1213,13 @@ async def on_message(message: discord.Message):
                         )
                         ai_reply = groq_response.choices[0].message.content
                         if ai_reply:
-                            logger.info("✨ [第三防線] Groq 成功守住最後防線！")
+                            logger.info("✨ [第二防線] Groq 成功守住最後防線！")
                     except Exception as groq_error:
-                        logger.error(f"❌ [第三防線] Groq 最終備援也宣告失敗: {groq_error}")
+                        logger.error(f"❌ [第二防線] Groq 最終備援也宣告失敗: {groq_error}")
 
                 # ───【🚨 終極檢查：全線癱瘓防範】───
                 if not ai_reply:
-                    logger.error("❌ [核心崩潰] 三大 API 管道於本次故事請求中全數癱瘓。")
+                    logger.error("❌ [核心崩潰] Gemini 與 Groq API 管道於本次故事請求中全數癱瘓。")
                     await message.reply("❌ 67+AI suck. Try again later.")
                     return
 
@@ -1263,16 +1230,6 @@ async def on_message(message: discord.Message):
                 ai_reply = f"{ai_reply}\n\n-# 67+AI suck and frequently makes mistakes; please verify it yourself."
                 await message.reply(ai_reply)
                 return  # 結束事件
-
-        except asyncio.CancelledError:
-            logger.info(f"🛑 偵測到用戶收回訊息！已強制取消當前 AI 協程任務，並將計時器歸零。")
-            ai_cooldowns[user_id] = 0
-            raise  
-        except Exception as e:
-            logger.error(f"❌ 外層 AI 呼叫流程發生未知錯誤: {e}")
-        finally:
-            if 'active_ai_tasks' in globals():
-                globals()['active_ai_tasks'].pop(message.id, None)
             
 
     # =================================================================
