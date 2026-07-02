@@ -1201,7 +1201,7 @@ async def on_message(message: discord.Message):
                     except Exception as gemini_err:
                         logger.warning(f"⚠️ [第一防線] Gemini 直連失敗: {gemini_err}，準備切換至 Groq...")
 
-# ... 上方為 Gemini 與 Groq 的雙級備援呼叫邏輯 ...
+                # ───【第二防線：Groq API 終極備援】───
                 if not ai_reply:
                     try:
                         logger.info("🤖 [2/2] 前方失敗！觸發最終底線，請求 Groq API (llama-3.3-70b-versatile)...")
@@ -1216,28 +1216,28 @@ async def on_message(message: discord.Message):
                             logger.info("✨ [第二防線] Groq 終極防線救援成功！")
                     except Exception as groq_err:
                         logger.error(f"❌ [第二防線] Groq 也失敗了: {groq_err}")
-        
-                # 👉 如果成功取得 AI 回覆，發送並結束事件
-                if ai_reply:
-                    await message.reply(ai_reply)
-                    return  # 結束事件
-        
-            # 💡 【新增點】在此處閉合最外層的 try，捕獲 AI 處理期間的任何未知錯誤
-            except Exception as e:
-                logger.error(f"❌ AI 處理過程發生錯誤: {e}")
                 
-            finally:
-                # 💡 【新增點】不論成功或失敗，都把訊息 ID 從 active_ai_tasks 清除，釋放記憶體
-                if 'active_ai_tasks' in globals() and message.id in globals()['active_ai_tasks']:
-                    globals()['active_ai_tasks'].pop(message.id, None)
-        
-                        # 安全字數截斷與發送
-                        if len(ai_reply) > 700:
-                            ai_reply = ai_reply[:697] + "..."
-                            
-                        ai_reply = f"{ai_reply}\n\n-# 67+AI suck and frequently makes mistakes; please verify it yourself."
-                        await message.reply(ai_reply)
-                        return  # 結束事件
+                # ───【🚨 終極檢查：全線癱瘓防範】───
+                if not ai_reply:
+                    logger.error("❌ [核心崩潰] Gemini 與 Groq API 管道於本次故事請求中全數癱瘓。")
+                    await message.reply("❌ 67+AI suck. Try again later.")
+                    return
+
+                # 安全字數截斷與發送
+                if len(ai_reply) > 700:
+                    ai_reply = ai_reply[:697] + "..."
+                    
+                ai_reply = f"{ai_reply}\n\n-# 67+AI suck and frequently makes mistakes; please verify it yourself."
+                await message.reply(ai_reply)
+                return  # 結束事件，不觸發後續 XP 增加系統
+
+        except Exception as e:
+            logger.error(f"❌ AI 處理過程發生錯誤: {e}")
+            
+        finally:
+            # 確保無論成功或發生異常，都會將任務從全域追蹤清單中移除
+            if 'active_ai_tasks' in globals() and message.id in globals()['active_ai_tasks']:
+                globals()['active_ai_tasks'].pop(message.id, None)
             
 
     # =================================================================
