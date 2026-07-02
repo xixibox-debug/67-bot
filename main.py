@@ -31,25 +31,35 @@ if os.path.dirname(DB_PATH):
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("SixSevenBot")
 
-#AI模型改用openrouter一坨
+# =================================================================
+# 🤖 AI 用戶端初始化 (新增 Gemini 直連與三階備援設定)
+# =================================================================
 
+# 1. OpenRouter 客戶端與免費池 (移除了無用項目，並將大容量模型前移)
 ai_client = AsyncOpenAI(
     api_key=os.getenv("OPENROUTER_API_KEY"),
     base_url="https://openrouter.ai/api/v1"
 )
 MODEL_POOL = [
+    "google/gemini-2.5-flash:free",                  # 👈 移至第一順位，抗 429 能力最強
     "mistralai/mistral-small-3.1-24b-instruct:free",
-    "google/gemini-2.5-flash:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "openrouter/free"
+    "meta-llama/llama-3.3-70b-instruct:free"
 ]
 
+# 2. Groq 客戶端 (作為終極防線)
 groq_client = AsyncOpenAI(
     api_key=os.getenv("GROQ_API_KEY"),
     base_url="https://api.groq.com/openai/v1"
 )
 
+# 3. ✨ 新增：直連 Google Gemini 客戶端 (利用 OpenAI 相容端點語法)
+gemini_client = AsyncOpenAI(
+    api_key=os.getenv("GEMINI_API_KEY"),
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+)
+
 ai_cooldowns = {}
+
 # =================================================================
 # 🗄️ 2. DATABASE INITIALIZATION (資料庫初始化)
 # =================================================================
@@ -1106,9 +1116,7 @@ async def on_message(message: discord.Message):
 
         ai_cooldowns[user_id] = current_time
 
-        # 🚀 直接呼叫 Groq AI (整合 Tavily 連網、收回偵測、連續對話)
-
-# 🚀 直接呼叫 Groq AI (整合 Tavily 連網、收回偵測、連續對話)
+# 🚀 直接呼叫 AI (整合 10層/10分鐘連貫回溯、Tavily 連網、收回偵測、三級 API 備援)
         if 'active_ai_tasks' not in globals():
             globals()['active_ai_tasks'] = {}
 
@@ -1118,90 +1126,146 @@ async def on_message(message: discord.Message):
 
             async with message.channel.typing():
                 
-                # 1. 先檢查是否為「回覆 AI」的訊息，並載入歷史紀錄與優化搜尋關鍵字
+                # -----------------------------------------------------------
+                # 🧠 核心邏輯：動態爬軌跡，最多回溯 10 則、限時 10 分鐘的連貫回覆
+                # -----------------------------------------------------------
                 conversation_history = []
-                search_query = clean_content  # 預設搜尋當前用戶輸入的內容
+                current_ref = message.reference
+                history_count = 0
                 
-                if message.reference and message.reference.message_id:
+                # discord.py 的 message.created_at 是時區感知的 UTC 時間
+                now_utc = datetime.datetime.now(datetime.timezone.utc)
+                
+                logger.info("🔍 開始追溯單獨連貫的回覆鏈...")
+                while current_ref and current_ref.message_id and history_count < 10:
                     try:
-                        ref_msg = await message.channel.fetch_message(message.reference.message_id)
-                        if ref_msg.author.id == bot.user.id:  
-                            # 移除舊回應底部的免責聲明，避免干擾 AI 學習
-                            past_clean = ref_msg.content.split("\n\n67+AI suck")[0].split("\n\n-# 67+AI suck")[0].strip()
-                            conversation_history.append({"role": "assistant", "content": past_clean})
-                            logger.info("💬 偵測到用戶回覆 AI 訊息，成功載入上一輪對話上下文！")
-                            
-                            # 🚀 【深度脈絡追蹤】無條件追溯第二層：機器人上一句是在回答哪一個「源頭提問」
-                            root_context = ""
-                            if ref_msg.reference and ref_msg.reference.message_id:
-                                try:
-                                    orig_msg = await message.channel.fetch_message(ref_msg.reference.message_id)
-                                    root_context = orig_msg.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
-                                    logger.info(f"🔍 成功追溯到對話源頭主題: {root_context}")
-                                except Exception as orig_err:
-                                    logger.warning(f"無法獲取源源頭訊息內容: {orig_err}")
-                            
-                            # 🧠 無條件組合搜尋詞（不設任何字數門檻）
-                            if root_context:
-                                # 有最原始提問，就將「源頭提問 + 當前追問」綁在一起搜尋
-                                search_query = f"{root_context} {clean_content}"
-                            else:
-                                # 沒有原始提問（例如中途插進來回覆），就直接把機器人上一句跟當前輸入綁在一起
-                                bg_keywords = re.sub(r'[#\*`>-]', '', past_clean).strip()
-                                search_query = f"{bg_keywords} {clean_content}"
-                                
-                            logger.info(f"🔍 最終優化交給 Tavily 的關鍵字: {search_query}")
-                    except Exception as ref_err:
-                        logger.warning(f"無法獲取回覆訊息內容: {ref_err}")
+                        ref_msg = await message.channel.fetch_message(current_ref.message_id)
+                        
+                        # ⏳ 檢查時間限制：如果該則訊息距離現在超過 10 分鐘(600秒)，則立即斬斷記憶
+                        if (now_utc - ref_msg.created_at).total_seconds() > 600:
+                            logger.info(f"⏱️ 訊息 {ref_msg.id} 已超過 10 分鐘，停止向上回溯。")
+                            break
+                        
+                        # 解析並清理內容，依照身份貼上標籤
+                        if ref_msg.author.id == bot.user.id:
+                            role = "assistant"
+                            # 拔除舊回應底部的 67 免責聲明，避免干擾 AI
+                            content = ref_msg.content.split("\n\n67+AI suck")[0].split("\n\n-# 67+AI suck")[0].strip()
+                        else:
+                            role = "user"
+                            content = ref_msg.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
+                        
+                        # 💡 關鍵：使用 insert(0, ...) 確保越古老的訊息排在陣列越前面，符合聊天紀錄順序
+                        conversation_history.insert(0, {"role": role, "content": content})
+                        history_count += 1
+                        
+                        # 繼續向上尋找該訊息是否有「更上一層的回覆目標」
+                        current_ref = ref_msg.reference
+                        
+                    except Exception as chain_err:
+                        logger.warning(f"⚠️ 無法獲取回覆鏈中某個節點的訊息 (可能被刪除): {chain_err}")
+                        break # 連貫中斷，直接跳出
+                
+                logger.info(f"✨ 成功載入 {history_count} 則連貫上下文記憶！")
 
-                # 2. 呼叫 Tavily 進行非同步網路搜尋
+                # 🌐 優化 Tavily 搜尋關鍵字：如果有歷史故事，結合「故事起點(最早的提問)」與「最新提問」送去搜尋
+                if conversation_history:
+                    search_query = f"{conversation_history[0]['content']} {clean_content}"
+                else:
+                    search_query = clean_content
+                
+                # 呼叫 Tavily 進行非同步網路搜尋
                 search_context = await tavily_search(search_query)
 
-                # 3. 組合 System、歷史對話與本次提問，直接送給 Groq
-                groq_messages = [
+                # 🧱 組合 System、故事歷史與本次提問
+                ai_messages = [
                     {
                         "role": "system", 
                         "content": (
                             "You are an AI model in a Discord bot called '67'. You like to say 67 (but don't say it too often) and respond just like Meta AI. "
                             "Drop the corporate PR tone, be direct, slightly witty. "
-                            "Use ENGLISH to response. but if the user use chinese, u should use TRADIONAL CHINESE to response. DONT use Simpify chinese. Max 800 characters.\n\n"
+                            "Use ENGLISH to response. but if the user use chinese, u should use TRADITIONAL CHINESE to response. DONT use Simplified chinese. Max 800 characters.\n\n"
                             f"【請優先參考以下網路即時資訊回答】：\n{search_context}"
                         )
                     }
                 ]
-                groq_messages.extend(conversation_history)
-                groq_messages.append({"role": "user", "content": clean_content})
+                ai_messages.extend(conversation_history)
+                ai_messages.append({"role": "user", "content": clean_content})
 
-                logger.info("🤖 正在直接請求 Groq API (llama-3.3-70b-versatile)...")
                 ai_reply = None
                 
-                try:
-                    response = await groq_client.chat.completions.create(
-                        model="llama-3.3-70b-versatile",
-                        messages=groq_messages,
-                        max_tokens=600,
-                        temperature=0.7
-                    )
-                    ai_reply = response.choices[0].message.content
-                    logger.info("✨ Groq 回應成功！")
-                except Exception as groq_error:
-                    logger.error(f"❌ Groq 呼叫失敗: {groq_error}")
-                    await message.reply("❌ 67+AI suck. Try again later.\n\n-# 67+AI suck and frequently makes mistakes; please verify it yourself.")
+                # ===========================================================
+                # 🛡️ ⚔️ 三陣營火線防禦機制 (Gemini 直連 -> OpenRouter -> Groq)
+                # ===========================================================
+                
+                # ───【第一防線：直連 Google Gemini API】───
+                if os.getenv("GEMINI_API_KEY") and not ai_reply:
+                    try:
+                        logger.info("🤖 [1/3] 優先請求直連 Gemini API (gemini-1.5-flash)...")
+                        gemini_response = await gemini_client.chat.completions.create(
+                            model="gemini-1.5-flash", 
+                            messages=ai_messages,
+                            max_tokens=600,
+                            temperature=0.7
+                        )
+                        ai_reply = gemini_response.choices[0].message.content
+                        if ai_reply:
+                            logger.info("✨ [第一防線] 直連 Gemini 成功救援故事！")
+                    except Exception as gemini_err:
+                        logger.warning(f"⚠️ [第一防線] Gemini 直連失敗: {gemini_err}，準備切換至 OpenRouter...")
+
+                # ───【第二防線：OpenRouter 免費模型池】───
+                if not ai_reply:
+                    logger.info("🤖 [2/3] 前方失敗，正在啟動 OpenRouter 免費池輪詢...")
+                    for model_name in MODEL_POOL:
+                        try:
+                            logger.info(f"🔄 嘗試呼叫 OpenRouter 模型: {model_name}")
+                            router_response = await ai_client.chat.completions.create(
+                                model=model_name,
+                                messages=ai_messages,
+                                max_tokens=500,
+                                temperature=0.7
+                            )
+                            ai_reply = router_response.choices[0].message.content
+                            if ai_reply:
+                                logger.info(f"✨ [第二防線] OpenRouter [{model_name}] 救場成功！")
+                                break
+                        except Exception as pool_err:
+                            logger.error(f"❌ OpenRouter 模型 [{model_name}] 遭遇錯誤/429: {pool_err}，嘗試下一個...")
+                            continue
+
+                # ───【第三防線：Groq API 終極墊底】───
+                if not ai_reply:
+                    try:
+                        logger.info("🤖 [3/3] 前方全滅！觸發最終底線，請求 Groq API (llama-3.3-70b-versatile)...")
+                        groq_response = await groq_client.chat.completions.create(
+                            model="llama-3.3-70b-versatile",
+                            messages=ai_messages,
+                            max_tokens=600,
+                            temperature=0.7
+                        )
+                        ai_reply = groq_response.choices[0].message.content
+                        if ai_reply:
+                            logger.info("✨ [第三防線] Groq 成功守住最後防線！")
+                    except Exception as groq_error:
+                        logger.error(f"❌ [第三防線] Groq 最終備援也宣告失敗: {groq_error}")
+
+                # ───【🚨 終極檢查：全線癱瘓防範】───
+                if not ai_reply:
+                    logger.error("❌ [核心崩潰] 三大 API 管道於本次故事請求中全數癱瘓。")
+                    await message.reply("❌ 67+AI suck. Try again later.")
                     return
 
-                # 安全字數截斷
-                if ai_reply and len(ai_reply) > 700:
+                # 安全字數截斷與發送
+                if len(ai_reply) > 700:
                     ai_reply = ai_reply[:697] + "..."
                     
-                if ai_reply:
-                    ai_reply = f"{ai_reply}\n\n-# 67+AI suck and frequently makes mistakes; please verify it yourself."
-                    await message.reply(ai_reply)
-                else:
-                    await message.reply("❌ 67+AI suck. Try again later.\n\n-# 67+AI suck and frequently makes mistakes; please verify it yourself.")
+                ai_reply = f"{ai_reply}\n\n-# 67+AI suck and frequently makes mistakes; please verify it yourself."
+                await message.reply(ai_reply)
                 return  # 結束事件
 
         except asyncio.CancelledError:
-            logger.info(f"🛑 偵測到用戶收回訊息！已強制切換 Groq AI 工作，並將計時器歸零。")
+            logger.info(f"🛑 偵測到用戶收回訊息！已強制取消當前 AI 協程任務，並將計時器歸零。")
             ai_cooldowns[user_id] = 0
             raise  
         except Exception as e:
