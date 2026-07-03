@@ -226,7 +226,7 @@ class ManualMsgModal(ui.Modal, title="手動發送訊息設定"):
         
         # 2. 檢查是否要偽裝成 AI (如果前面的 fake-ai 選擇了 True)
         if self.fake_ai:
-            content += "\n\n-# 67+AI suck and frequently makes mistakes; please verify it yourself."
+            content += "\n\n-# **67+AI (1.5)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
 
         # 先延遲交互回應，避免後續抓取或發送訊息時卡住導致 Token 超時
         await interaction.response.send_message("⏳ Sending...", ephemeral=True)
@@ -1190,7 +1190,7 @@ async def on_message(message: discord.Message):
                         if ref_msg.author.id == bot.user.id:
                             role = "assistant"
                             # 拔除舊回應底部的 67 免責聲明，避免干擾 AI
-                            content = ref_msg.content.split("\n\n67+AI suck")[0].split("\n\n-# 67+AI suck")[0].strip()
+                            content = ref_msg.content.split("\n\n-# **67+AI")[0].split("\n\n-# 67+AI")[0].split("\n\n67+AI")[0].strip()
                         else:
                             role = "user"
                             content = ref_msg.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
@@ -1238,7 +1238,9 @@ async def on_message(message: discord.Message):
                 # 🛡️ ⚔️ 雙陣營火線防禦機制 (Gemini 直連 -> Groq 備援)
                 # ===========================================================
                 
-                # ───【第一防線：直連 Google Gemini API 輪詢機制】───
+# ───【第一防線：直連 Google Gemini API 輪詢機制】───
+                used_provider = None  # 💡 用於追蹤是哪一個模型成功回應
+                
                 if os.getenv("GEMINI_API_KEY") and not ai_reply:
                     gemini_models = ["gemini-3.5-flash", "gemini-3-flash", "gemini-2.5-flash", "gemini-3.1-flash-lite"]
                     for model_name in gemini_models:
@@ -1247,15 +1249,20 @@ async def on_message(message: discord.Message):
                             gemini_response = await gemini_client.chat.completions.create(
                                 model=model_name, 
                                 messages=ai_messages,
-                                # max_tokens=600,
                                 temperature=0.7
                             )
                             ai_reply = gemini_response.choices[0].message.content
                             if ai_reply:
                                 logger.info(f"✨ [第一防線] 直連 Gemini ({model_name}) 成功救援故事！")
+                                # 💡 根據成功回應的模型決定標記
+                                if model_name in ["gemini-3.5-flash", "gemini-3-flash", "gemini-2.5-flash"]:
+                                    used_provider = "gemini_loop"
+                                elif model_name == "gemini-3.1-flash-lite":
+                                    used_provider = "gemini_lite"
                                 break  # 成功取得回應，跳出 Gemini 輪詢
                         except Exception as gemini_err:
                             logger.warning(f"⚠️ [第一防線] Gemini ({model_name}) 直連失敗: {gemini_err}，準備切換下一順位...")
+
                 # ───【第二防線：Groq API 終極備援】───
                 if not ai_reply:
                     try:
@@ -1269,6 +1276,7 @@ async def on_message(message: discord.Message):
                         ai_reply = groq_response.choices[0].message.content
                         if ai_reply:
                             logger.info("✨ [第二防線] Groq 終極防線救援成功！")
+                            used_provider = "groq"
                     except Exception as groq_err:
                         logger.error(f"❌ [第二防線] Groq 也失敗了: {groq_err}")
                 
@@ -1278,21 +1286,23 @@ async def on_message(message: discord.Message):
                     await message.reply("❌ 67+AI suck. Try again later.")
                     return
 
-                # 安全字數截斷與發送
-                if len(ai_reply) > 700:
+                # 安全字數截斷（僅針對 Groq 進行截斷，Gemini 回覆不用砍字數）
+                if used_provider not in ["gemini_loop", "gemini_lite"] and len(ai_reply) > 700:
                     ai_reply = ai_reply[:697] + "..."
                     
-                ai_reply = f"{ai_reply}\n\n-# 67+AI suck and frequently makes mistakes; please verify it yourself."
+                # 🎯 根據成功的來源追加對應的新版格式浮水印
+                if used_provider == "gemini_loop":
+                    watermark = "\n\n-# **67+AI (2.5 loop)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
+                elif used_provider == "gemini_lite":
+                    watermark = "\n\n-# **67+AI (2a)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
+                elif used_provider == "groq":
+                    watermark = "\n\n-# **67+AI (1)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
+                else:
+                    watermark = "\n\n-# 67+AI suck and frequently makes mistakes; please verify it yourself."
+
+                ai_reply = f"{ai_reply}{watermark}"
                 await message.reply(ai_reply)
                 return  # 結束事件，不觸發後續 XP 增加系統
-
-        except Exception as e:
-            logger.error(f"❌ AI 處理過程發生錯誤: {e}")
-            
-        finally:
-            # 確保無論成功或發生異常，都會將任務從全域追蹤清單中移除
-            if 'active_ai_tasks' in globals() and message.id in globals()['active_ai_tasks']:
-                globals()['active_ai_tasks'].pop(message.id, None)
             
 
     # =================================================================
