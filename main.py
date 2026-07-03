@@ -9,9 +9,9 @@ import re
 import sqlite3
 import aiohttp
 import asyncio
-import time  # 引入時間套件以供冷卻時間計算
+import time  
 from typing import Optional
-from openai import AsyncOpenAI  # 👈 改為導入 OpenAI 非同步客戶端
+from openai import AsyncOpenAI 
 
 # =================================================================
 # ⚙️ 1. GLOBAL BOT CONFIGURATIONS (全局設定)
@@ -922,26 +922,28 @@ async def ecorob(interaction: discord.Interaction, user: discord.Member):
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="ecobalance", description="Check account balance or view top rank leaderboard")
-async def ecobalance(interaction: discord.Interaction, user: Optional[discord.Member] = None):
-    target = user or interaction.user
-    uid = str(target.id)
-    ensure_eco_user(uid)
-    
-    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-    cursor.execute("SELECT balance FROM economy WHERE user_id = ?", (uid,))
-    bal = cursor.fetchone()[0]
-    conn.close()
-    
-    embed = discord.Embed(
-        title=f"{target.name}'s balance",
-        color=0xffa500,
-        description=f"💰 Balance\n**${bal}**"
-    )
-    embed.set_footer(text=f"{interaction.guild.name} | 67")
-    
-    view = EcoBalanceView(target, interaction.guild)
-    await interaction.response.send_message(embed=embed, view=view)
-
+    async def ecobalance(self, interaction: discord.Interaction, user: Optional[discord.Member] = None):
+        target = user or interaction.user
+        uid = str(target.id)
+        gid = str(interaction.guild.id) # 🎯 獲取當前伺服器 ID
+        ensure_eco_user(uid)
+        
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT balance FROM economy WHERE user_id = ?", (uid,))
+        bal = cursor.fetchone()[0]
+        conn.close()
+        
+        embed = discord.Embed(
+            title=f"{target.name}'s balance",
+            color=0xffa500,
+            description=f"💰 Balance\n**${bal}**"
+        )
+        embed.set_footer(text=f"{interaction.guild.name} | 67")
+        
+        # 🎯 關鍵：將 gid (伺服器 ID) 傳入 view，讓排行榜按鈕知道只撈該伺服器的人
+        view = EcoBalanceView(target, interaction.guild)
+        await interaction.response.send_message(embed=embed, view=view)
 @bot.tree.command(name="setbalance", description="Admin command to modify user balance")
 @app_commands.checks.has_permissions(administrator=True)
 async def setbalance(interaction: discord.Interaction, user: discord.Member, value: int):
