@@ -1303,6 +1303,14 @@ async def on_message(message: discord.Message):
                 ai_reply = f"{ai_reply}{watermark}"
                 await message.reply(ai_reply)
                 return  # 結束事件，不觸發後續 XP 增加系統
+
+        except Exception as e:
+            logger.error(f"❌ AI 處理過程發生錯誤: {e}")
+            
+        finally:
+            # 確保無論成功或發生異常，都會將任務從全域追蹤清單中移除
+            if 'active_ai_tasks' in globals() and message.id in globals()['active_ai_tasks']:
+                globals()['active_ai_tasks'].pop(message.id, None)
             
 
     # =================================================================
