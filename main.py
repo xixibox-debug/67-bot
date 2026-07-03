@@ -1238,22 +1238,24 @@ async def on_message(message: discord.Message):
                 # 🛡️ ⚔️ 雙陣營火線防禦機制 (Gemini 直連 -> Groq 備援)
                 # ===========================================================
                 
-                # ───【第一防線：直連 Google Gemini API】───
+                # ───【第一防線：直連 Google Gemini API 輪詢機制】───
                 if os.getenv("GEMINI_API_KEY") and not ai_reply:
-                    try:
-                        logger.info("🤖 [1/2] 優先請求直連 Gemini API (gemini-2.5-flash)...")
-                        gemini_response = await gemini_client.chat.completions.create(
-                            model="gemini-2.5-flash", 
-                            messages=ai_messages,
-                            # max_tokens=600,
-                            temperature=0.7
-                        )
-                        ai_reply = gemini_response.choices[0].message.content
-                        if ai_reply:
-                            logger.info("✨ [第一防線] 直連 Gemini 成功救援故事！")
-                    except Exception as gemini_err:
-                        logger.warning(f"⚠️ [第一防線] Gemini 直連失敗: {gemini_err}，準備切換至 Groq...")
-
+                    gemini_models = ["gemini-3.5-flash", "gemini-3-flash", "gemini-2.5-flash", "gemini-3.1-flash-lite"]
+                    for model_name in gemini_models:
+                        try:
+                            logger.info(f"🤖 優先請求直連 Gemini API ({model_name})...")
+                            gemini_response = await gemini_client.chat.completions.create(
+                                model=model_name, 
+                                messages=ai_messages,
+                                # max_tokens=600,
+                                temperature=0.7
+                            )
+                            ai_reply = gemini_response.choices[0].message.content
+                            if ai_reply:
+                                logger.info(f"✨ [第一防線] 直連 Gemini ({model_name}) 成功救援故事！")
+                                break  # 成功取得回應，跳出 Gemini 輪詢
+                        except Exception as gemini_err:
+                            logger.warning(f"⚠️ [第一防線] Gemini ({model_name}) 直連失敗: {gemini_err}，準備切換下一順位...")
                 # ───【第二防線：Groq API 終極備援】───
                 if not ai_reply:
                     try:
