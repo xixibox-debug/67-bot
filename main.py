@@ -295,7 +295,7 @@ class WelcomeGoodbyeModal(ui.Modal, title="Set Welcome Message"):
         w_d = parse_placeholders(self.w_desc.value, interaction.user, interaction.guild)
         embed = discord.Embed(title=w_t, description=w_d, color=interaction.user.color)
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
-        embed.set_footer(text=f"{interaction.guild.name} | 67")
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.send_message(content="✅ **Embed Text Content Saved!** Preview:", embed=embed, ephemeral=True)
 
 
@@ -330,7 +330,7 @@ class WelcomeConfigView(ui.View):
     @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
         embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nAuto Mute\nTime Message")
-        embed.set_footer(text=f"{interaction.guild.name} | 67")
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=SettingsView())
 
 
@@ -463,7 +463,7 @@ class AutoMuteConfigView(ui.View):
     @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=0)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
         embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nAuto Mute\nTime Message")
-        embed.set_footer(text=f"{interaction.guild.name} | 67")
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=SettingsView())
 
 
@@ -526,7 +526,7 @@ class TimeMessageConfigView(ui.View):
     @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=0)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
         embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nAuto Mute\nTime Message")
-        embed.set_footer(text=f"{interaction.guild.name} | 67")
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=SettingsView())
 
 
@@ -535,7 +535,7 @@ class SettingsView(ui.View):
     @ui.button(label="Welcome/Goodbye Panel", style=discord.ButtonStyle.secondary, emoji="👋")
     async def btn_w(self, interaction: discord.Interaction, btn: ui.Button):
         embed = discord.Embed(title="👋 Welcome & Goodbye Settings", color=0x54a7dd, description="Select the target channel first, I will let u edit the embed content later.。")
-        embed.set_footer(text=f"{interaction.guild.name} | 67")
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=WelcomeConfigView())
         
     @ui.button(label="Level System", style=discord.ButtonStyle.secondary, emoji="🎉")
@@ -545,13 +545,13 @@ class SettingsView(ui.View):
     @ui.button(label="Auto Mute", style=discord.ButtonStyle.secondary, emoji="🔒")
     async def btn_a(self, interaction: discord.Interaction, btn: ui.Button):
         embed = discord.Embed(title="🔒 Auto Mute Filter Config Hub", color=0xff0000, description="Create text filtering parameters or remove existing configurations below.")
-        embed.set_footer(text=f"{interaction.guild.name} | 67")
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=AutoMuteConfigView(interaction.guild_id))
         
     @ui.button(label="Time Message", style=discord.ButtonStyle.secondary, emoji="⏰")
     async def btn_t(self, interaction: discord.Interaction, btn: ui.Button):
         embed = discord.Embed(title="⏰ Time Message Alerts Hub", color=0x3498db, description="Schedule timed standard text warnings or clear past records below.")
-        embed.set_footer(text=f"{interaction.guild.name} | 67")
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=TimeMessageConfigView(interaction.guild_id))
 
 # =================================================================
@@ -563,14 +563,14 @@ async def help_cmd(interaction: discord.Interaction):
     embed = discord.Embed(title="Bot Help Menu", color=discord.Color.gold())
     embed.add_field(name="Admin Commands", value="`/settings`, `/mute`, `/unmute`, `/kick`, `/setlevel`, `/manualmsg`")
     embed.add_field(name="User Commands", value="`/level`, `/random67`, `/help`")
-    embed.set_footer(text=f"{interaction.guild.name} | 67" if interaction.guild else "67")
+    embed.set_footer(text=f"{interaction.guild.name}｜67" if interaction.guild else "67")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="settings", description="Open bot configuration hub")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def settings(interaction: discord.Interaction):
     embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nAuto Mute\nTime Message")
-    embed.set_footer(text=f"{interaction.guild.name} | 67")
+    embed.set_footer(text=f"{interaction.guild.name}｜67")
     await interaction.response.send_message(embed=embed, view=SettingsView())
 
 @bot.tree.command(name="manualmsg", description="Send a message with bot (Moderators only, and u can add a 67+AI Watermark.")
@@ -592,7 +592,7 @@ async def mute(interaction: discord.Interaction, user: discord.Member, time: str
         color=0x2ecc71, 
         description=f"Time: {time}\nReason: {reason}"
     )
-    embed.set_footer(text=f"{interaction.guild.name} | 67" if interaction.guild else "67")
+    embed.set_footer(text=f"{interaction.guild.name}｜67" if interaction.guild else "67")
     await interaction.response.send_message(embed=embed)
 
 # 🛠️ 修正點：對應圖 2 之 Unmute 嵌入卡片（綠色邊框 + 變數渲染）
@@ -604,33 +604,59 @@ async def unmute(interaction: discord.Interaction, user: discord.Member):
         title=parse_placeholders("✅ {user.name} has been unmuted.", user, interaction.guild), 
         color=0x2ecc71
     )
-    embed.set_footer(text=f"{interaction.guild.name} | 67" if interaction.guild else "67")
+    embed.set_footer(text=f"{interaction.guild.name}｜67" if interaction.guild else "67")
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="kick", description="Kick a member from server")
 @app_commands.checks.has_permissions(kick_members=True)
 async def kick(interaction: discord.Interaction, user: discord.Member, reason: Optional[str] = "None"):
-    if user.id == interaction.guild.owner_id: return await interaction.response.send_message("❌ 無法對伺服器擁有者執行踢出處分！", ephemeral=True)
-    if user.id == bot.user.id: return await interaction.response.send_message("❌ 你不能叫我踢出我自己！", ephemeral=True)
+    if user.id == interaction.guild.owner_id: return await interaction.response.send_message("❌ Bro don't do that. I don't wnat to be fired.", ephemeral=True)
+    if user.id == bot.user.id: return await interaction.response.send_message("❌ Are u kidding? Call me to kick myself?", ephemeral=True)
     try:
         await user.kick(reason=reason)
         embed = discord.Embed(title=parse_placeholders("✅ {user.name} has been kicked.", user, interaction.guild), color=0xe74c3c, description=parse_placeholders("Reason: {reason}", user, interaction.guild, extra={"reason": reason}))
-        embed.set_footer(text=f"{interaction.guild.name} | 67")
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.send_message(embed=embed)
     except discord.Forbidden:
-        await interaction.response.send_message("❌ **踢出失敗！** 機器人的身分組階級不夠高，或缺少「踢出成員」權限。", ephemeral=True)
+        await interaction.response.send_message("❌ Call any moderator to give me a higher privileges.", ephemeral=True)
     except Exception as e:
-        await interaction.response.send_message(f"❌ 發生未知錯誤：{e}", ephemeral=True)
+        await interaction.response.send_message(f"❌ Sorry, something went wrong. Try again later.", ephemeral=True)
 
 @kick.error
 async def kick_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.errors.MissingPermissions): await interaction.response.send_message("❌ 你沒有「踢出成員」的權限！", ephemeral=True)
+    if isinstance(error, app_commands.errors.MissingPermissions): await interaction.response.send_message("❌ Bro don't have the kick permission. ", ephemeral=True)
 
+@bot.tree.command(name="ban", description="Ban a member from server")
+@app_commands.checks.has_permissions(ban_members=True)
+async def ban(interaction: discord.Interaction, user: discord.Member, reason: Optional[str] = "None"):
+    if user.id == interaction.guild.owner_id: 
+        return await interaction.response.send_message("❌ Bro don't do that. I don't wnat to be fired.", ephemeral=True)
+    if user.id == bot.user.id: 
+        return await interaction.response.send_message("❌ Are u kidding? Call me to ban myself?", ephemeral=True)
+        
+    try:
+        await user.ban(reason=reason)
+        embed = discord.Embed(
+            title=parse_placeholders("✅ {user.name} has been banned.", user, interaction.guild), 
+            color=0xe74c3c, 
+            description=parse_placeholders("Reason: {reason}", user, interaction.guild, extra={"reason": reason})
+        )
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
+        await interaction.response.send_message(embed=embed)
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ Call any moderator to give me a higher privileges.", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Sorry, something ({e}) went wrong. Try again later.", ephemeral=True)
+
+@ban.error
+async def ban_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.errors.MissingPermissions): 
+        await interaction.response.send_message("❌ Bro don't have the ban permission.", ephemeral=True)
 
 @bot.tree.command(name="setlevel", description="Manually set a member's level")
 @app_commands.checks.has_permissions(administrator=True)
 async def setlevel(interaction: discord.Interaction, user: discord.Member, level: int):
-    if level < 1: return await interaction.response.send_message("❌ 等級不能小於 1！", ephemeral=True)
+    if level < 1: return await interaction.response.send_message("❌ Ur math suck. Don't set level under 1.", ephemeral=True)
     
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
     cursor.execute("SELECT count_67 FROM levels WHERE user_id = ?", (str(user.id),))
@@ -642,7 +668,7 @@ async def setlevel(interaction: discord.Interaction, user: discord.Member, level
     conn.commit()
     
     # 回應操作的管理員（僅限管理員看見）
-    await interaction.response.send_message(f"✅ 已將 {user.name} 的等級調整為 Lv. {level}", ephemeral=True)
+    await interaction.response.send_message(f"✅ Set {user.name}'s level to Lv. {level}.", ephemeral=True)
     # 🎯 新增：手動調等後，自動補上對應等級的身分組獎勵
     await check_level_roles(user, level)
     
@@ -704,7 +730,7 @@ async def level(interaction: discord.Interaction, user: Optional[discord.Member]
         )
     )
     
-    embed.set_footer(text=f"{interaction.guild.name} | 67" if interaction.guild else "67")
+    embed.set_footer(text=f"{interaction.guild.name}｜67" if interaction.guild else "67")
     await interaction.response.send_message(embed=embed)
 
 
@@ -750,7 +776,7 @@ class EcoBalanceView(ui.View):
                 description=f"💰 Balance\n**${bal}**"
             )
             
-        embed.set_footer(text=f"{self.guild.name} | 67")
+        embed.set_footer(text=f"{self.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=self)
 
 def ensure_eco_user(user_id: str):
@@ -788,7 +814,7 @@ async def ecodaily(interaction: discord.Interaction):
         color=0x00ffff,
         description="You claimed **$100** daily reward !"
     )
-    embed.set_footer(text=f"{interaction.guild.name} | 67")
+    embed.set_footer(text=f"{interaction.guild.name}｜67")
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="ecowork", description="Go to work and earn money")
@@ -825,7 +851,7 @@ async def ecowork(interaction: discord.Interaction):
         )
         
     conn.commit(); conn.close()
-    embed.set_footer(text=f"{interaction.guild.name} | 67")
+    embed.set_footer(text=f"{interaction.guild.name}｜67")
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="ecopay", description="Pay money to another user")
@@ -866,7 +892,7 @@ async def ecopay(interaction: discord.Interaction, user: discord.Member, value: 
         color=0x00ffff,
         description=f"You successfully paid **{user.mention}** with **${net_value}** !\n(U need to pay 10% tax)"
     )
-    embed.set_footer(text=f"{interaction.guild.name} | 67")
+    embed.set_footer(text=f"{interaction.guild.name}｜67")
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="ecorob", description="Attempt to rob money from another user")
@@ -918,7 +944,7 @@ async def ecorob(interaction: discord.Interaction, user: discord.Member):
         )
         
     conn.commit(); conn.close()
-    embed.set_footer(text=f"{interaction.guild.name} | 67")
+    embed.set_footer(text=f"{interaction.guild.name}｜67")
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="ecobalance", description="Check account balance or view top rank leaderboard")
@@ -937,7 +963,7 @@ async def ecobalance(interaction: discord.Interaction, user: Optional[discord.Me
         color=0xffa500,
         description=f"💰 Balance\n**${bal}**"
     )
-    embed.set_footer(text=f"{interaction.guild.name} | 67")
+    embed.set_footer(text=f"{interaction.guild.name}｜67")
     
     view = EcoBalanceView(target, interaction.guild)
     await interaction.response.send_message(embed=embed, view=view)
@@ -1057,7 +1083,7 @@ async def on_member_join(member: discord.Member):
                 
                 embed = discord.Embed(title=title, description=desc, color=embed_color)
                 embed.set_thumbnail(url=member.display_avatar.url)
-                embed.set_footer(text=f"{guild.name} | 67")
+                embed.set_footer(text=f"{guild.name}｜67")
                 await channel.send(content=member.mention, embed=embed)
     except Exception as e: logger.error(f"[on_member_join 崩潰]: {e}")
 
@@ -1079,7 +1105,7 @@ async def on_member_remove(member: discord.Member):
                 embed_color = discord.Color(0xe74c3c)
                 embed = discord.Embed(title=title, description=desc, color=embed_color)
                 embed.set_thumbnail(url=member.display_avatar.url)
-                embed.set_footer(text=f"{member.guild.name} | 67")
+                embed.set_footer(text=f"{member.guild.name}｜67")
                 await channel.send(embed=embed)
     except Exception as e: logger.error(f"[on_member_remove 崩潰]: {e}")
 
@@ -1362,7 +1388,7 @@ async def on_message(message: discord.Message):
                     color=0xff0000, 
                     description=f'{message.author.mention} has been muted for **{dur}** due to sending a blocked word, you can try and be the next!'
                 )
-                embed.set_footer(text=f"{message.guild.name} | 67")
+                embed.set_footer(text=f"{message.guild.name}｜67")
                 await message.channel.send(embed=embed)
                 conn.close()
                 return 
