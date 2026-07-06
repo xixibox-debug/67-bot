@@ -404,7 +404,7 @@ class LevelRoleSettingsView(ui.View):
 
     @ui.button(label="⬅️ Back", style=discord.ButtonStyle.gray)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
-        embed = discord.Embed(title="⚙️ Level System Configuration", description="請選擇你要調整的等級系統設定：", color=0x2b2d31)
+        embed = discord.Embed(title="⚙️ Level System Configuration", description="Chose What do u want to set", color=0x2b2d31)
         await interaction.response.edit_message(embed=embed, view=self.original_view)
 
 
@@ -573,7 +573,7 @@ async def settings(interaction: discord.Interaction):
     embed.set_footer(text=f"{interaction.guild.name} | 67")
     await interaction.response.send_message(embed=embed, view=SettingsView())
 
-@bot.tree.command(name="manualmsg", description="管理員手動發送訊息（可模擬 AI 或回覆訊息）")
+@bot.tree.command(name="manualmsg", description="Send a message with bot (Moderators only, and u can add a 67+AI Watermark.")
 @app_commands.rename(fake_ai="fake-ai")  # 👈 讓參數在 Discord 面板上顯示為 fake-ai
 @app_commands.describe(fake_ai="Add 67+AI Watermark? (True=On / False=Off)")
 async def manualmsg(interaction: discord.Interaction, fake_ai: bool = False):
@@ -996,21 +996,38 @@ async def on_member_join(member: discord.Member):
         guild = member.guild
         inviter_found = None
         
-        # 🎯 核心修正：比對開機時快取的邀請碼數量變化，抓出真正邀請人
-        if guild.id in bot.invites:
-            try:
-                old_invites = bot.invites[guild.id]
-                new_invites = await guild.invites()
-                bot.invites[guild.id] = new_invites  # 更新快取
-                
-                for old_inv in old_invites:
-                    for new_inv in new_invites:
-                        if old_inv.code == new_inv.code and new_inv.uses > old_inv.uses:
-                            inviter_found = new_inv.inviter
-                            break
-                    if inviter_found: break
-            except Exception as invite_err:
-                logger.error(f"[邀請碼追蹤失敗]: {invite_err}")
+        # 🎯 終極修正：防範斷線重連、用完即焚碼、剛創即用碼，彻底消除 Someone 盲區
+        if guild.id not in bot.invites:
+            try: bot.invites[guild.id] = await guild.invites()
+            except: bot.invites[guild.id] = []
+
+        try:
+            old_invites = bot.invites[guild.id] or []
+            new_invites = await guild.invites()
+            bot.invites[guild.id] = new_invites  # 即時更新快取
+            
+            old_dict = {inv.code: inv for inv in old_invites}
+            new_dict = {inv.code: inv for inv in new_invites}
+            
+            # 1. 優先檢查：使用次數有增加的，或者「舊快取沒有」但一進來次數大於 0 的新代碼
+            for code, new_inv in new_dict.items():
+                if code in old_dict:
+                    if new_inv.uses > old_dict[code].uses:
+                        inviter_found = new_inv.inviter
+                        break
+                else:
+                    if new_inv.uses > 0:
+                        inviter_found = new_inv.inviter
+                        break
+                        
+            # 2. 備援檢查：如果是「單次使用網址」，用完就從新清單消失了，比對誰不見了
+            if not inviter_found:
+                for code, old_inv in old_dict.items():
+                    if code not in new_dict:
+                        inviter_found = old_inv.inviter
+                        break
+        except Exception as invite_err:
+            logger.error(f"[邀請碼追蹤失敗]: {invite_err}")
                 
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
