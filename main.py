@@ -606,20 +606,55 @@ async def manualmsg(interaction: discord.Interaction, fake_ai: bool = False):
     # 呼叫上方設計好的新版 Modal，並把 fake_ai 參數帶進去
     await interaction.response.send_modal(ManualMsgModal(fake_ai=fake_ai))
     
+async def resolve_ban_target(interaction: discord.Interaction, user_input: str):
+    """
+    解析 /ban 的 user 輸入，支援兩種格式：
+    1. @提及 或 從清單挑選（Discord 會自動轉成 <@id> 文字）
+    2. 純數字 Discord ID（用來 ban 已經不在伺服器的人）
+    回傳 (target, is_member)；解析失敗回傳 (None, None)
+    """
+    raw = user_input.strip()
+    match = re.match(r"^<@!?(\d+)>$", raw)
+    uid_str = match.group(1) if match else (raw if raw.isdigit() else None)
+    if uid_str is None:
+        return None, None
+    uid = int(uid_str)
+    member = interaction.guild.get_member(uid)
+    if member:
+        return member, True
+    try:
+        user_obj = await bot.fetch_user(uid)
+        return user_obj, False
+    except (discord.NotFound, discord.HTTPException):
+        return None, None
+        
 # 🛠️ 修正點：對應圖 2 之 Mute 嵌入卡片（綠色邊框 + 變數渲染）
 @bot.tree.command(name="mute", description="Timeout a server member")
 @app_commands.checks.has_permissions(moderate_members=True)
 async def mute(interaction: discord.Interaction, user: discord.Member, time: str, reason: Optional[str] = "None"):
     delta, err = parse_mute_duration(time)
     if err: return await interaction.response.send_message(err, ephemeral=True)
-    await user.timeout(delta, reason=reason)
-    embed = discord.Embed(
-        title=parse_placeholders("✅ {user.name} has been muted.", user, interaction.guild), 
-        color=0x2ecc71, 
-        description=f"Time: {time}\nReason: {reason}"
-    )
-    embed.set_footer(text=f"{interaction.guild.name}｜67" if interaction.guild else "67")
-    await interaction.response.send_message(embed=embed)
+    if user.id == interaction.guild.owner_id: return await interaction.response.send_message("❌ Bro don't do that. I don't wnat to be fired.", ephemeral=True)
+    if user.id == bot.user.id: return await interaction.response.send_message("❌ Are u kidding? Call me to mute myself?", ephemeral=True)
+
+    # 🎯 前置身分組階級檢查：對方比機器人高就直接跳 error，不要打去給 Discord 拒絕
+    bot_member = interaction.guild.me
+    if user.top_role >= bot_member.top_role:
+        return await interaction.response.send_message(f"❌ I can't mute **{user.display_name}**, their role is higher than or equal to mine.", ephemeral=True)
+
+    try:
+        await user.timeout(delta, reason=reason)
+        embed = discord.Embed(
+            title=parse_placeholders("✅ {user.name} has been muted.", user, interaction.guild), 
+            color=0x2ecc71, 
+            description=f"Time: {time}\nReason: {reason}"
+        )
+        embed.set_footer(text=f"{interaction.guild.name}｜67" if interaction.guild else "67")
+        await interaction.response.send_message(embed=embed)
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ Call any moderator to give me a higher privileges.", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Sorry, something ({e}) went wrong. Try again later.", ephemeral=True)
 
 # 🛠️ 修正點：對應圖 2 之 Unmute 嵌入卡片（綠色邊框 + 變數渲染）
 @bot.tree.command(name="unmute", description="Remove timeout from a member")
@@ -638,6 +673,12 @@ async def unmute(interaction: discord.Interaction, user: discord.Member):
 async def kick(interaction: discord.Interaction, user: discord.Member, reason: Optional[str] = "None"):
     if user.id == interaction.guild.owner_id: return await interaction.response.send_message("❌ Bro don't do that. I don't wnat to be fired.", ephemeral=True)
     if user.id == bot.user.id: return await interaction.response.send_message("❌ Are u kidding? Call me to kick myself?", ephemeral=True)
+
+    # 🎯 前置身分組階級檢查：對方比機器人高就直接跳 error
+    bot_member = interaction.guild.me
+    if user.top_role >= bot_member.top_role:
+        return await interaction.response.send_message(f"❌ Bro don't do that. I don't wnat to be fired.", ephemeral=True)
+
     try:
         await user.kick(reason=reason)
         embed = discord.Embed(title=parse_placeholders("✅ {user.name} has been kicked.", user, interaction.guild), color=0xe74c3c, description=parse_placeholders("Reason: {reason}", user, interaction.guild, extra={"reason": reason}))
@@ -653,19 +694,30 @@ async def kick_error(interaction: discord.Interaction, error: app_commands.AppCo
     if isinstance(error, app_commands.errors.MissingPermissions): await interaction.response.send_message("❌ Bro don't have the kick permission. ", ephemeral=True)
 
 @bot.tree.command(name="ban", description="Ban a member from server")
+@app_commands.describe(user="Choose a user or enter the user's ID（that means u can ban a user that's not in the server）")
 @app_commands.checks.has_permissions(ban_members=True)
-async def ban(interaction: discord.Interaction, user: discord.Member, reason: Optional[str] = "None"):
-    if user.id == interaction.guild.owner_id: 
+async def ban(interaction: discord.Interaction, user: str, reason: Optional[str] = "None"):
+    target, is_member = await resolve_ban_target(interaction, user)
+    if target is None:
+        return await interaction.response.send_message("❌ Invalid user. Tag a user or enter the correct user ID (It's a long numbers, for example 1145141919810....)", ephemeral=True)
+
+    if target.id == interaction.guild.owner_id: 
         return await interaction.response.send_message("❌ Bro don't do that. I don't wnat to be fired.", ephemeral=True)
-    if user.id == bot.user.id: 
+    if target.id == bot.user.id: 
         return await interaction.response.send_message("❌ Are u kidding? Call me to ban myself?", ephemeral=True)
-        
+
+    # 🎯 前置身分組階級檢查：只有對方還在群內時才有身分組可比較
+    if is_member:
+        bot_member = interaction.guild.me
+        if target.top_role >= bot_member.top_role:
+            return await interaction.response.send_message(f"❌ Bro don't do that. I don't wnat to be fired.", ephemeral=True)
+
     try:
-        await user.ban(reason=reason)
+        await interaction.guild.ban(target, reason=reason)
         embed = discord.Embed(
-            title=parse_placeholders("✅ {user.name} has been banned.", user, interaction.guild), 
+            title=parse_placeholders("✅ {user.name} has been banned.", target, interaction.guild), 
             color=0xe74c3c, 
-            description=parse_placeholders("Reason: {reason}", user, interaction.guild, extra={"reason": reason})
+            description=parse_placeholders("Reason: {reason}", target, interaction.guild, extra={"reason": reason})
         )
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.send_message(embed=embed)
