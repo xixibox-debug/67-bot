@@ -556,7 +556,7 @@ class TimeMessageConfigView(ui.View):
 
 class SettingsView(ui.View):
     def __init__(self): super().__init__(timeout=None)
-   @ui.button(label="Welcome/Goodbye Panel", style=discord.ButtonStyle.secondary, emoji="👋")
+    @ui.button(label="Welcome/Goodbye Panel", style=discord.ButtonStyle.secondary, emoji="👋")
     async def btn_w(self, interaction: discord.Interaction, btn: ui.Button):
         embed = discord.Embed(title="👋 Welcome & Goodbye Settings", color=0x54a7dd, description="Select the target channel first, I will let u edit the embed content later.。")
         embed.set_footer(text=f"{interaction.guild.name}｜67")
@@ -676,6 +676,35 @@ async def ban(interaction: discord.Interaction, user: discord.Member, reason: Op
 
 @ban.error
 async def ban_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.errors.MissingPermissions): 
+        await interaction.response.send_message("❌ Bro don't have the ban permission.", ephemeral=True)
+
+@bot.tree.command(name="unban", description="Unban a user from server")
+@app_commands.checks.has_permissions(ban_members=True)
+async def unban(interaction: discord.Interaction, user_id: str, reason: Optional[str] = "None"):
+    try:
+        target = await bot.fetch_user(int(user_id))
+    except (ValueError, discord.NotFound):
+        return await interaction.response.send_message("❌ Invalid user ID.", ephemeral=True)
+
+    try:
+        await interaction.guild.unban(target, reason=reason)
+        embed = discord.Embed(
+            title=parse_placeholders("✅ {user.name} has been unbanned.", target, interaction.guild), 
+            color=0x2ecc71, 
+            description=parse_placeholders("Reason: {reason}", target, interaction.guild, extra={"reason": reason})
+        )
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
+        await interaction.response.send_message(embed=embed)
+    except discord.NotFound:
+        await interaction.response.send_message("❌ This user isn't banned.", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ Call any moderator to give me a higher privileges.", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Sorry, something ({e}) went wrong. Try again later.", ephemeral=True)
+
+@unban.error
+async def unban_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.errors.MissingPermissions): 
         await interaction.response.send_message("❌ Bro don't have the ban permission.", ephemeral=True)
 
