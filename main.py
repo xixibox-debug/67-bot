@@ -300,8 +300,18 @@ class WelcomeGoodbyeModal(ui.Modal, title="Set Welcome Message"):
 
 
 class WelcomeConfigView(ui.View):
-    def __init__(self): super().__init__(timeout=300)
+    def __init__(self, guild_id: int = None):
+        super().__init__(timeout=300)
+        if guild_id:
+            conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+            cursor.execute("SELECT channel_id FROM welcome WHERE guild_id = ?", (str(guild_id),))
+            row = cursor.fetchone()
+            conn.close()
+            if row and row[0]:
+                self.set_channel.default_values = [discord.Object(id=int(row[0]))]
+
     @ui.select(cls=ui.ChannelSelect, channel_types=[discord.ChannelType.text], placeholder="🎯 Select Welcome Alert Channel")
+    async def set_channel(self, interaction: discord.Interaction, select: ui.ChannelSelect):
     async def set_channel(self, interaction: discord.Interaction, select: ui.ChannelSelect):
         cid = select.values[0].id
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
@@ -347,7 +357,16 @@ class LevelMessageModal(ui.Modal, title="Set Level Up Message"):
 
 
 class LevelSettingsView(ui.View):
-    def __init__(self): super().__init__(timeout=180)
+    def __init__(self, guild_id: int = None):
+        super().__init__(timeout=180)
+        if guild_id:
+            conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+            cursor.execute("SELECT channel_id FROM levelup WHERE guild_id = ?", (str(guild_id),))
+            row = cursor.fetchone()
+            conn.close()
+            if row and row[0]:
+                self.select_level_channel.default_values = [discord.Object(id=int(row[0]))]
+
     @ui.select(cls=ui.ChannelSelect, channel_types=[discord.ChannelType.text], placeholder="Select Level Up Channel 📢")
     async def select_level_channel(self, interaction: discord.Interaction, select: ui.ChannelSelect):
         cid = select.values[0].id
@@ -370,6 +389,12 @@ class LevelSettingsView(ui.View):
     @ui.button(label="Modify Level Message", style=discord.ButtonStyle.success)
     async def mod_text(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(LevelMessageModal())
+
+    @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=2)
+    async def back(self, interaction: discord.Interaction, button: ui.Button):
+        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nAuto Mute\nTime Message")
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
+        await interaction.response.edit_message(embed=embed, view=SettingsView())
 
 
 class LevelRoleModal(ui.Modal, title="Set give role to select level"):
@@ -532,15 +557,17 @@ class TimeMessageConfigView(ui.View):
 
 class SettingsView(ui.View):
     def __init__(self): super().__init__(timeout=None)
-    @ui.button(label="Welcome/Goodbye Panel", style=discord.ButtonStyle.secondary, emoji="👋")
+   @ui.button(label="Welcome/Goodbye Panel", style=discord.ButtonStyle.secondary, emoji="👋")
     async def btn_w(self, interaction: discord.Interaction, btn: ui.Button):
         embed = discord.Embed(title="👋 Welcome & Goodbye Settings", color=0x54a7dd, description="Select the target channel first, I will let u edit the embed content later.。")
         embed.set_footer(text=f"{interaction.guild.name}｜67")
-        await interaction.response.edit_message(embed=embed, view=WelcomeConfigView())
+        await interaction.response.edit_message(embed=embed, view=WelcomeConfigView(interaction.guild_id))
         
     @ui.button(label="Level System", style=discord.ButtonStyle.secondary, emoji="🎉")
     async def btn_l(self, interaction: discord.Interaction, btn: ui.Button):
-        await interaction.response.send_message("📈 **Level System Configuration**", view=LevelSettingsView(), ephemeral=True)
+        embed = discord.Embed(title="📈 Level System Configuration", color=0x2ecc71, description="Set level up channel, message, and level-role rewards below.")
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
+        await interaction.response.edit_message(embed=embed, view=LevelSettingsView(interaction.guild_id))
         
     @ui.button(label="Auto Mute", style=discord.ButtonStyle.secondary, emoji="🔒")
     async def btn_a(self, interaction: discord.Interaction, btn: ui.Button):
