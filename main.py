@@ -312,7 +312,6 @@ class WelcomeConfigView(ui.View):
 
     @ui.select(cls=ui.ChannelSelect, channel_types=[discord.ChannelType.text], placeholder="🎯 Select Welcome Alert Channel")
     async def set_channel(self, interaction: discord.Interaction, select: ui.ChannelSelect):
-    async def set_channel(self, interaction: discord.Interaction, select: ui.ChannelSelect):
         cid = select.values[0].id
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
         cursor.execute("SELECT w_title, w_desc, g_title, g_desc FROM welcome WHERE guild_id = ?", (str(interaction.guild_id),))
