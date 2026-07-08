@@ -953,11 +953,75 @@ async def level(interaction: discord.Interaction, user: Optional[discord.Member]
     view = LevelBoardView(target, interaction.guild)
     await interaction.response.send_message(embed=embed, view=view)
 
+from typing import Literal, Optional
 
-@bot.tree.command(name="random67", description="Get lucky 67 message")
-async def random67(interaction: discord.Interaction):
-    jokes = ["67 is magic!", "Luck factor: 67", "Spirit of Six Seven!"]
-    await interaction.response.send_message(random.choice(jokes))
+@bot.tree.command(name="random67", description="Get a random message about 67 / 獲取一則67訊息")
+@app_commands.describe(language="Select language / 選擇語言")
+async def random67(interaction: discord.Interaction, language: Literal["English", "中文"]):
+    jokes_en = [
+        "67 is magic!",
+        "Luck factor: 67%",
+        "Spirit of Six Seven!",
+        "Keep calm and 67 on.",
+        "42 is the answer to life, but 67 is the upgrade.",
+        "67: Not all heroes wear capes, some are just numbers.",
+        "Error 67: Too much luck detected!",
+        "You got blessed by the legendary 67 spirit ✨",
+        "67% of all statistics are made up on the spot, including this one.",
+        "Why was 6 afraid of 7? Because 7 ate 9... but 67 just chilled.",
+        "May the 67 be with you, always.",
+        "67 mode activated: 100% chance of randomness!"
+    ]
+    
+    jokes_zh = [
+        # 👑 洗腦大獎段落
+        "「欸six seven🗣️🗣️🔥🔥🔥\n欸six seven🗣️🗣️🔥🔥🔥\nsix！six！seven🥰🥰\n欸six seven🗣️🗣️🔥🔥🔥\n阿公67↗️\n阿公阿公67↘️↗️\n阿公67↗️\n阿公67↗️\n阿公阿公67↘️↗️\n阿公！！🥰🥰🥰\n67！\n阿公阿公67↘️↗️\nsix seven🗣️🗣️🔥🔥🔥」",
+        
+        # 👴👵 直系長輩
+        "阿公67", "阿嬤67", "外公67", "外婆67",
+        
+        # 👴 伯公 / 叔公 / 姑婆
+        "大伯公67", "二伯公67", "三伯公67",
+        "大叔公67", "二叔公67", "三叔公67",
+        "大姑婆67", "二姑婆67", "三姑婆67",
+        
+        # 👴👵 舅公 / 姨婆 / 嬸婆 / 伯婆 / 舅婆
+        "大舅公67", "二舅公67", "三舅公67",
+        "大姨婆67", "二姨婆67", "三姨婆67",
+        "大嬸婆67", "二嬸婆67", "三嬸婆67",
+        "大伯婆67", "二伯婆67", "三伯婆67",
+        "大舅婆67", "二舅婆67", "三舅婆67",
+        
+        # 👨‍🦳 姑丈公 / 姨丈公
+        "大姑丈公67", "二姑丈公67", "三姑丈公67",
+        "大姨丈公67", "二姨丈公67", "三姨丈公67",
+        
+        # 👨 伯父 / 叔父 / 姑姑 / 舅舅 / 阿姨
+        "大伯67", "二伯67", "三伯67",
+        "大叔67", "二叔67", "三叔67",
+        "大姑67", "二姑67", "三姑67",
+        "大舅67", "二舅67", "三舅67",
+        "大姨67", "二姨67", "三姨67",
+        
+        # 👩 伯母 / 嬸嬸 / 舅媽 / 姑丈 / 姨丈
+        "大伯母67", "二伯母67", "三伯母67",
+        "大嬸嬸67", "二嬸嬸67", "三嬸嬸67",
+        "大舅媽67", "二舅媽67", "三舅媽67",
+        "大姑丈67", "二姑丈67", "三姑丈67",
+        "大姨丈67", "二姨丈67", "三姨丈67",
+        
+        # 🧑 表親長輩類
+        "大表伯67", "二表伯67", "三表伯67",
+        "大表叔67", "二表叔67", "三表叔67",
+        "大表姑67", "二表姑67", "三表姑67",
+        "大表舅67", "二表舅67", "三表舅67",
+        "大表姨67", "二表姨67", "三表姨67",
+        "大表嬸67", "二表嬸67", "三表嬸67",
+        "大表舅媽67", "二表舅媽67", "三表舅媽67"
+    ]
+
+    selected = random.choice(jokes_en if language == "English" else jokes_zh)
+    await interaction.response.send_message(selected)
 # =================================================================
 # 💰 ECONOMY SYSTEM COMMANDS & VIEWS (對應圖 {696E6907-11CB-4468-B5BB-9C2678E2F7F2}.png)
 # =================================================================
@@ -1056,21 +1120,55 @@ async def ecowork(interaction: discord.Interaction):
         return await interaction.response.send_message(f"❌ You are exhausted! Please wait {rem // 60}m {rem % 60}s before working again.", ephemeral=True)
         
     success = random.random() > 0.1
+    # 🎯 成功賺錢的理由（12 種）
+    work_success_reasons = [
+        "help ur neighbor walked the dog",
+        "worked a shift at McDonald's",
+        "fixed ur boss's computer by turning it off and on",
+        "sold some old anime figures on eBay",
+        "helped an old lady cross the street",
+        "tutored a kid in math for 2 hours",
+        "cleaned up the local park",
+        "delivered pizzas all night",
+        "found a lost wallet and returned it for a reward",
+        "wrote a Discord bot for a friend",
+        "mowed ur neighbor's lawn",
+        "streamed on Twitch and got some generous donations"
+    ]
+
+    # 🎯 失敗扣錢的理由（12 種）
+    work_fail_reasons = [
+        "run the red light while delivering the package",
+        "dropped and broke a set of expensive coffee cups at work",
+        "accidentally ordered 50 cups of boba tea for everyone",
+        "got fined for sleeping on the job",
+        "spilled coffee all over ur boss's mechanical keyboard",
+        "got a parking ticket while delivering food",
+        "bought a useless mystery box on the internet",
+        "tripped and ruined the giant birthday cake u were carrying",
+        "got caught playing games during working hours",
+        "accidentally deleted the company's database",
+        "broke the soft-serve ice cream machine at work",
+        "lost ur wallet while running to catch the bus"
+    ]
+
     if success:
         amount = random.randint(200, 2000)
-        cursor.execute("UPDATE economy SET balance = balance + ?, last_work = ? WHERE guild_id = ? AND user_id = ?", (amount, now, gid, uid))
+        cursor.execute("UPDATE economy SET balance = balance + ?, last_work = ? WHERE user_id = ?", (amount, now, uid))
+        reason = random.choice(work_success_reasons)
         embed = discord.Embed(
             title="Work",
             color=0x00ffff,
-            description=f"You **help ur neighbor walked the dog** and earned **${amount}** !"
+            description=f"You **{reason}** and earned **${amount}** !"
         )
     else:
         amount = random.randint(50, 100)
-        cursor.execute("UPDATE economy SET balance = MAX(0, balance - ?), last_work = ? WHERE guild_id = ? AND user_id = ?", (amount, now, gid, uid))
+        cursor.execute("UPDATE economy SET balance = MAX(0, balance - ?), last_work = ? WHERE user_id = ?", (amount, now, uid))
+        reason = random.choice(work_fail_reasons)
         embed = discord.Embed(
             title="Work",
             color=0xff6b6b,
-            description=f"You **run the red light while delivering the package** and losted **${amount}** !"
+            description=f"You **{reason}** and losted **${amount}** !"
         )
         
     conn.commit(); conn.close()
