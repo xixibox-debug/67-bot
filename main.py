@@ -1233,12 +1233,17 @@ async def setvoice(interaction: discord.Interaction, channel: Optional[discord.V
 
     try:
         if existing_vc:
-            await existing_vc.move_to(channel)
+            await asyncio.wait_for(existing_vc.move_to(channel), timeout=15)
         else:
-            await channel.connect(self_mute=True, self_deaf=True)
+            await asyncio.wait_for(channel.connect(self_mute=True, self_deaf=True, timeout=15), timeout=20)
     except (discord.ClientException, asyncio.TimeoutError) as e:
         conn.close()
-        return await interaction.followup.send(f"❌ I can't join: {e}", ephemeral=True)
+        # 🎯 強制清掉卡住的殘留連線，避免下次指令又卡住
+        stuck_vc = discord.utils.get(bot.voice_clients, guild=interaction.guild)
+        if stuck_vc:
+            try: await stuck_vc.disconnect(force=True)
+            except: pass
+        return await interaction.followup.send("❌ Voice connect timed out. This is very likely a network restriction on the hosting platform (Railway often blocks the outbound UDP traffic that Discord voice needs), not a bug in the bot itself. And if u wnat me transfer to other host platform, contect the developer and give him some money.", ephemeral=True)
 
     cursor.execute("INSERT OR REPLACE INTO voice_watch (guild_id, channel_id) VALUES (?, ?)", (gid, str(channel.id)))
     conn.commit(); conn.close()
