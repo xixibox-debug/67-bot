@@ -995,7 +995,7 @@ async def random67(interaction: discord.Interaction, language: Literal["English"
     ]
     
     # 👑 洗腦大獎段落
-    big_prize_zh = "「欸six seven🗣️🗣️🔥🔥🔥\n欸six seven🗣️🗣️🔥🔥🔥\nsix！six！seven🥰🥰\n欸six seven🗣️🗣️🔥🔥🔥\n阿公67↗️\n阿公阿公67↘️↗️\n阿公67↗️\n阿公67↗️\n阿公阿公67↘️↗️\n阿公！！🥰🥰🥰\n67！\n阿公阿公67↘️↗️\nsix seven🗣️🗣️🔥🔥🔥」"
+    big_prize_zh = "欸six seven🗣️🗣️🔥🔥🔥\n欸six seven🗣️🗣️🔥🔥🔥\nsix！six！seven🥰🥰\n欸six seven🗣️🗣️🔥🔥🔥\n阿公67↗️\n阿公阿公67↘️↗️\n阿公67↗️\n阿公67↗️\n阿公阿公67↘️↗️\n阿公！！🥰🥰🥰\n67！\n阿公阿公67↘️↗️\nsix seven🗣️🗣️🔥🔥🔥"
 
     # 👴👵 一般親戚圖鑑
     relatives_zh = [
