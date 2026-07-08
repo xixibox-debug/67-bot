@@ -955,9 +955,30 @@ async def level(interaction: discord.Interaction, user: Optional[discord.Member]
 
 from typing import Literal, Optional
 
-@bot.tree.command(name="random67", description="Get a random message about 67 / 獲取一則67訊息")
+random67_cooldowns = {}
+
+@bot.tree.command(name="random67", description="Get a 67 message / 獲取67迷因訊息")
 @app_commands.describe(language="Select language / 選擇語言")
 async def random67(interaction: discord.Interaction, language: Literal["English", "中文"]):
+    user = interaction.user
+    is_admin = user.guild_permissions.administrator if isinstance(user, discord.Member) else False
+
+    # ⏳ 檢查冷卻時間（管理員不受限制）
+    if not is_admin:
+        now = time.time()
+        last_used = random67_cooldowns.get(user.id, 0)
+        cooldown_time = 60  # 冷卻秒數
+
+        if now - last_used < cooldown_time:
+            remaining = int(cooldown_time - (now - last_used))
+            return await interaction.response.send_message(
+                f"⏳ U use this command too frequently. Wait for `{remaining}` seconds.", 
+                ephemeral=True
+            )
+        
+        # 紀錄本次使用時間
+        random67_cooldowns[user.id] = now
+
     jokes_en = [
         "67 is magic!",
         "Luck factor: 67%",
@@ -973,44 +994,32 @@ async def random67(interaction: discord.Interaction, language: Literal["English"
         "67 mode activated: 100% chance of randomness!"
     ]
     
-    jokes_zh = [
-        # 👑 洗腦大獎段落
-        "「欸six seven🗣️🗣️🔥🔥🔥\n欸six seven🗣️🗣️🔥🔥🔥\nsix！six！seven🥰🥰\n欸six seven🗣️🗣️🔥🔥🔥\n阿公67↗️\n阿公阿公67↘️↗️\n阿公67↗️\n阿公67↗️\n阿公阿公67↘️↗️\n阿公！！🥰🥰🥰\n67！\n阿公阿公67↘️↗️\nsix seven🗣️🗣️🔥🔥🔥」",
-        
-        # 👴👵 直系長輩
+    # 👑 洗腦大獎段落
+    big_prize_zh = "「欸six seven🗣️🗣️🔥🔥🔥\n欸six seven🗣️🗣️🔥🔥🔥\nsix！six！seven🥰🥰\n欸six seven🗣️🗣️🔥🔥🔥\n阿公67↗️\n阿公阿公67↘️↗️\n阿公67↗️\n阿公67↗️\n阿公阿公67↘️↗️\n阿公！！🥰🥰🥰\n67！\n阿公阿公67↘️↗️\nsix seven🗣️🗣️🔥🔥🔥」"
+
+    # 👴👵 一般親戚圖鑑
+    relatives_zh = [
         "阿公67", "阿嬤67", "外公67", "外婆67",
-        
-        # 👴 伯公 / 叔公 / 姑婆
         "大伯公67", "二伯公67", "三伯公67",
         "大叔公67", "二叔公67", "三叔公67",
         "大姑婆67", "二姑婆67", "三姑婆67",
-        
-        # 👴👵 舅公 / 姨婆 / 嬸婆 / 伯婆 / 舅婆
         "大舅公67", "二舅公67", "三舅公67",
         "大姨婆67", "二姨婆67", "三姨婆67",
         "大嬸婆67", "二嬸婆67", "三嬸婆67",
         "大伯婆67", "二伯婆67", "三伯婆67",
         "大舅婆67", "二舅婆67", "三舅婆67",
-        
-        # 👨‍🦳 姑丈公 / 姨丈公
         "大姑丈公67", "二姑丈公67", "三姑丈公67",
         "大姨丈公67", "二姨丈公67", "三姨丈公67",
-        
-        # 👨 伯父 / 叔父 / 姑姑 / 舅舅 / 阿姨
         "大伯67", "二伯67", "三伯67",
         "大叔67", "二叔67", "三叔67",
         "大姑67", "二姑67", "三姑67",
         "大舅67", "二舅67", "三舅67",
         "大姨67", "二姨67", "三姨67",
-        
-        # 👩 伯母 / 嬸嬸 / 舅媽 / 姑丈 / 姨丈
         "大伯母67", "二伯母67", "三伯母67",
         "大嬸嬸67", "二嬸嬸67", "三嬸嬸67",
         "大舅媽67", "二舅媽67", "三舅媽67",
         "大姑丈67", "二姑丈67", "三姑丈67",
         "大姨丈67", "二姨丈67", "三姨丈67",
-        
-        # 🧑 表親長輩類
         "大表伯67", "二表伯67", "三表伯67",
         "大表叔67", "二表叔67", "三表叔67",
         "大表姑67", "二表姑67", "三表姑67",
@@ -1020,7 +1029,15 @@ async def random67(interaction: discord.Interaction, language: Literal["English"
         "大表舅媽67", "二表舅媽67", "三表舅媽67"
     ]
 
-    selected = random.choice(jokes_en if language == "English" else jokes_zh)
+    if language == "English":
+        selected = random.choice(jokes_en)
+    else:
+        # 🎯 50% 機率出洗腦大獎，剩下 50% 隨機抽親戚
+        if random.random() < 0.5:
+            selected = big_prize_zh
+        else:
+            selected = random.choice(relatives_zh)
+
     await interaction.response.send_message(selected)
 # =================================================================
 # 💰 ECONOMY SYSTEM COMMANDS & VIEWS (對應圖 {696E6907-11CB-4468-B5BB-9C2678E2F7F2}.png)
