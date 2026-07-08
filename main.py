@@ -1213,6 +1213,7 @@ async def setbalance(interaction: discord.Interaction, user: discord.Member, val
 @app_commands.describe(channel="Choose the target channel, blank means cancelled.")
 @app_commands.checks.has_permissions(administrator=True)
 async def setvoice(interaction: discord.Interaction, channel: Optional[discord.VoiceChannel] = None):
+    await interaction.response.defer()  # 🎯 先延長回應期限到 15 分鐘，避免語音握手超過 3 秒導致沒反應
     gid = str(interaction.guild_id)
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
 
@@ -1221,23 +1222,23 @@ async def setvoice(interaction: discord.Interaction, channel: Optional[discord.V
         if vc: await vc.disconnect(force=True)
         cursor.execute("DELETE FROM voice_watch WHERE guild_id = ?", (gid,))
         conn.commit(); conn.close()
-        return await interaction.response.send_message("✅ Cancelled afking.", ephemeral=True)
+        return await interaction.followup.send("✅ Cancelled afking.", ephemeral=True)
 
     existing_vc = discord.utils.get(bot.voice_clients, guild=interaction.guild)
     active_count = len([vc for vc in bot.voice_clients if vc.is_connected()])
 
     if not existing_vc and active_count >= MAX_VOICE_WATCH:
         conn.close()
-        return await interaction.response.send_message(f"❌ Maximum number of channels available for AFK ({MAX_VOICE_WATCH} channels., use `/setvoice` to cancelled some channels and try again later", ephemeral=True)
+        return await interaction.followup.send(f"❌ Maximum number of channels available for AFK ({MAX_VOICE_WATCH} channels), use `/setvoice` to cancel some channels and try again later", ephemeral=True)
 
     try:
         if existing_vc:
             await existing_vc.move_to(channel)
         else:
             await channel.connect(self_mute=True, self_deaf=True)
-    except discord.ClientException as e:
+    except (discord.ClientException, asyncio.TimeoutError) as e:
         conn.close()
-        return await interaction.response.send_message(f"❌ I can't join {e}.", ephemeral=True)
+        return await interaction.followup.send(f"❌ I can't join: {e}", ephemeral=True)
 
     cursor.execute("INSERT OR REPLACE INTO voice_watch (guild_id, channel_id) VALUES (?, ?)", (gid, str(channel.id)))
     conn.commit(); conn.close()
@@ -1253,7 +1254,7 @@ async def setvoice(interaction: discord.Interaction, channel: Optional[discord.V
         description=f"Now afking in {channel.mention}."
     )
     embed.set_footer(text=f"{interaction.guild.name}｜67")
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
 @setvoice.error
 async def setvoice_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
