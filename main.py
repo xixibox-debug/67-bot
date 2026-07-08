@@ -48,6 +48,10 @@ groq_client = AsyncOpenAI(
 )
 ai_cooldowns = {}
 
+# 🎯 語音時數追蹤：(guild_id, user_id) -> 進入監聽頻道的時間戳
+voice_sessions = {}
+MAX_VOICE_WATCH = 5  # 全機器人同時間最多監聽 5 個語音頻道
+
 # =================================================================
 # 🗄️ 2. DATABASE INITIALIZATION (資料庫初始化)
 # =================================================================
@@ -64,24 +68,62 @@ def init_db():
     cursor.execute("CREATE TABLE IF NOT EXISTS announcements (id INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT, message TEXT, channel_id TEXT)")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS levels (
-            user_id TEXT PRIMARY KEY, 
+            guild_id TEXT,
+            user_id TEXT, 
             xp INTEGER DEFAULT 0, 
             level INTEGER DEFAULT 1, 
-            count_67 INTEGER DEFAULT 0
+            count_67 INTEGER DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id)
         )
     """)
+    # 🎯 舊版 levels 表沒有 guild_id，資料無法安全歸屬到特定伺服器，偵測到舊結構就重建（歸零）
+    cursor.execute("PRAGMA table_info(levels)")
+    if 'guild_id' not in [c[1] for c in cursor.fetchall()]:
+        cursor.execute("ALTER TABLE levels RENAME TO levels_old")
+        cursor.execute("""
+            CREATE TABLE levels (
+                guild_id TEXT,
+                user_id TEXT, 
+                xp INTEGER DEFAULT 0, 
+                level INTEGER DEFAULT 1, 
+                count_67 INTEGER DEFAULT 0,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        """)
+        cursor.execute("DROP TABLE levels_old")
+        conn.commit()
     cursor.execute("CREATE TABLE IF NOT EXISTS mutes (guild_id TEXT, banned_word TEXT, duration_str TEXT, PRIMARY KEY (guild_id, banned_word))")
     
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS economy (
-            user_id TEXT PRIMARY KEY,
+            guild_id TEXT,
+            user_id TEXT,
             balance INTEGER DEFAULT 0,
             last_daily TEXT DEFAULT '',
             last_work INTEGER DEFAULT 0,
             last_pay INTEGER DEFAULT 0,
-            last_rob INTEGER DEFAULT 0
+            last_rob INTEGER DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id)
         )
     """)
+    # 🎯 舊版 economy 表沒有 guild_id，資料無法安全歸屬到特定伺服器，偵測到舊結構就重建（歸零）
+    cursor.execute("PRAGMA table_info(economy)")
+    if 'guild_id' not in [c[1] for c in cursor.fetchall()]:
+        cursor.execute("ALTER TABLE economy RENAME TO economy_old")
+        cursor.execute("""
+            CREATE TABLE economy (
+                guild_id TEXT,
+                user_id TEXT,
+                balance INTEGER DEFAULT 0,
+                last_daily TEXT DEFAULT '',
+                last_work INTEGER DEFAULT 0,
+                last_pay INTEGER DEFAULT 0,
+                last_rob INTEGER DEFAULT 0,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        """)
+        cursor.execute("DROP TABLE economy_old")
+        conn.commit()
     # 🎯 新增：建立等級身分組獎勵配置表
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS level_roles (
@@ -89,6 +131,16 @@ def init_db():
             level INTEGER,
             role_id TEXT,
             PRIMARY KEY (guild_id, level)
+        )
+    """)
+    # 🎯 新增：語音時數追蹤功能
+    cursor.execute("CREATE TABLE IF NOT EXISTS voice_watch (guild_id TEXT PRIMARY KEY, channel_id TEXT)")
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS voice_time (
+            guild_id TEXT,
+            user_id TEXT,
+            seconds INTEGER DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id)
         )
     """)
     conn.commit()
@@ -765,13 +817,14 @@ async def unban_error(interaction: discord.Interaction, error: app_commands.AppC
 async def setlevel(interaction: discord.Interaction, user: discord.Member, level: int):
     if level < 1: return await interaction.response.send_message("❌ Ur math suck. Don't set level under 1.", ephemeral=True)
     
+    gid = str(interaction.guild_id)
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-    cursor.execute("SELECT count_67 FROM levels WHERE user_id = ?", (str(user.id),))
+    cursor.execute("SELECT count_67 FROM levels WHERE guild_id = ? AND user_id = ?", (gid, str(user.id)))
     row = cursor.fetchone()
     current_67 = row[0] if row else 0
     
     # 變更等級，並將目前 XP 歸零重算
-    cursor.execute("INSERT OR REPLACE INTO levels (user_id, xp, level, count_67) VALUES (?, ?, ?, ?)", (str(user.id), 0, level, current_67))
+    cursor.execute("INSERT OR REPLACE INTO levels (guild_id, user_id, xp, level, count_67) VALUES (?, ?, ?, ?, ?)", (gid, str(user.id), 0, level, current_67))
     conn.commit()
     
     # 回應操作的管理員（僅限管理員看見）
@@ -797,25 +850,84 @@ async def setlevel(interaction: discord.Interaction, user: discord.Member, level
 
 
 # 🛠️ 修正點：完全遵循圖 6 藍圖重製的 /level 面板，無任何自創欄位或隱藏修改
+class LevelBoardView(ui.View):
+    def __init__(self, target: discord.User, guild: discord.Guild):
+        super().__init__(timeout=60)
+        self.target = target
+        self.guild = guild
+        self.mode = "personal"
+
+    @ui.button(label="Leaderboard / Personal 🔄", style=discord.ButtonStyle.primary)
+    async def toggle(self, interaction: discord.Interaction, button: ui.Button):
+        gid = str(self.guild.id)
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+
+        if self.mode == "personal":
+            self.mode = "leaderboard"
+            cursor.execute("SELECT user_id, level, xp FROM levels WHERE guild_id = ? ORDER BY level DESC, xp DESC LIMIT 10", (gid,))
+            rows = cursor.fetchall(); conn.close()
+
+            desc = ""
+            for idx, (uid, lvl, xp) in enumerate(rows, 1):
+                user = bot.get_user(int(uid))
+                name = user.name if user else f"User {uid}"
+                desc += f"{idx}. **{name}**: Lv.{lvl} ({xp} XP)\n"
+
+            embed = discord.Embed(title=f"🏆 {self.guild.name} Level Leaderboard", description=desc or "No data available.", color=0x9b59b6)
+        else:
+            self.mode = "personal"
+            cursor.execute("SELECT xp, level, count_67 FROM levels WHERE guild_id = ? AND user_id = ?", (gid, str(self.target.id)))
+            row = cursor.fetchone()
+
+            xp, lvl, count_67 = row if row else (0, 1, 0)
+            is_admin = self.target.guild_permissions.administrator if isinstance(self.target, discord.Member) else False
+            xp_needed = get_xp_needed(lvl, is_admin)
+
+            cursor.execute("SELECT COUNT(*) FROM levels WHERE guild_id = ? AND (level > ? OR (level = ? AND xp > ?))", (gid, lvl, lvl, xp))
+            level_rank = cursor.fetchone()[0] + 1
+
+            cursor.execute("SELECT COUNT(*) FROM levels WHERE guild_id = ? AND count_67 > ?", (gid, count_67))
+            count_67_rank = cursor.fetchone()[0] + 1
+            conn.close()
+
+            embed = discord.Embed(
+                title=f"{self.target.name}'s Level",
+                color=0x9b59b6,
+                description=(
+                    "**Level**\n"
+                    f"{lvl}\n"
+                    "**XP**\n"
+                    f"{xp}/{xp_needed}\n"
+                    "**67 Times**\n"
+                    f"{count_67}\n\n"
+                    "**Level Rank**\n"
+                    f"#{level_rank}\n"
+                    "**User 67 Rank**\n"
+                    f"#{count_67_rank}"
+                )
+            )
+
+        embed.set_footer(text=f"{self.guild.name}｜67")
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
 @bot.tree.command(name="level", description="Check current activity stats and 67 counts")
 async def level(interaction: discord.Interaction, user: Optional[discord.Member] = None):
     target = user or interaction.user
+    gid = str(interaction.guild_id)
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-    cursor.execute("SELECT xp, level, count_67 FROM levels WHERE user_id = ?", (str(target.id),))
+    cursor.execute("SELECT xp, level, count_67 FROM levels WHERE guild_id = ? AND user_id = ?", (gid, str(target.id)))
     row = cursor.fetchone()
     
     xp, lvl, count_67 = row if row else (0, 1, 0)
     is_admin = target.guild_permissions.administrator if isinstance(target, discord.Member) else False
     xp_needed = get_xp_needed(lvl, is_admin)
     
-    # 📈 高效率全服即時排名計算
-
-    
-    # 📈 高效率全服即時排名計算
-    cursor.execute("SELECT COUNT(*) FROM levels WHERE level > ? OR (level = ? AND xp > ?)", (lvl, lvl, xp))
+    # 📈 高效率同伺服器內即時排名計算
+    cursor.execute("SELECT COUNT(*) FROM levels WHERE guild_id = ? AND (level > ? OR (level = ? AND xp > ?))", (gid, lvl, lvl, xp))
     level_rank = cursor.fetchone()[0] + 1
     
-    cursor.execute("SELECT COUNT(*) FROM levels WHERE count_67 > ?", (count_67,))
+    cursor.execute("SELECT COUNT(*) FROM levels WHERE guild_id = ? AND count_67 > ?", (gid, count_67))
     count_67_rank = cursor.fetchone()[0] + 1
     conn.close()
     
@@ -838,7 +950,8 @@ async def level(interaction: discord.Interaction, user: Optional[discord.Member]
     )
     
     embed.set_footer(text=f"{interaction.guild.name}｜67" if interaction.guild else "67")
-    await interaction.response.send_message(embed=embed)
+    view = LevelBoardView(target, interaction.guild)
+    await interaction.response.send_message(embed=embed, view=view)
 
 
 @bot.tree.command(name="random67", description="Get lucky 67 message")
@@ -858,10 +971,11 @@ class EcoBalanceView(ui.View):
 
     @ui.button(label="Leaderboard / Balance 🔄", style=discord.ButtonStyle.primary)
     async def toggle(self, interaction: discord.Interaction, button: ui.Button):
+        gid = str(self.guild.id)
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
         if self.mode == "balance":
             self.mode = "leaderboard"
-            cursor.execute("SELECT user_id, balance FROM economy ORDER BY balance DESC LIMIT 10")
+            cursor.execute("SELECT user_id, balance FROM economy WHERE guild_id = ? ORDER BY balance DESC LIMIT 10", (gid,))
             rows = cursor.fetchall(); conn.close()
             
             desc = ""
@@ -873,7 +987,7 @@ class EcoBalanceView(ui.View):
             embed = discord.Embed(title=f"🏆 {self.guild.name} Leaderboard", description=desc or "No data available.", color=0xffa500)
         else:
             self.mode = "balance"
-            cursor.execute("SELECT balance FROM economy WHERE user_id = ?", (str(self.target.id),))
+            cursor.execute("SELECT balance FROM economy WHERE guild_id = ? AND user_id = ?", (gid, str(self.target.id)))
             row = cursor.fetchone(); conn.close()
             bal = row[0] if row else 0
             
@@ -886,12 +1000,12 @@ class EcoBalanceView(ui.View):
         embed.set_footer(text=f"{self.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=self)
 
-def ensure_eco_user(user_id: str):
+def ensure_eco_user(guild_id: str, user_id: str):
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-    cursor.execute("SELECT balance, last_daily, last_work, last_pay, last_rob FROM economy WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT balance, last_daily, last_work, last_pay, last_rob FROM economy WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
     row = cursor.fetchone()
     if not row:
-        cursor.execute("INSERT INTO economy (user_id, balance) VALUES (?, 0)", (user_id,))
+        cursor.execute("INSERT INTO economy (guild_id, user_id, balance) VALUES (?, ?, 0)", (guild_id, user_id))
         conn.commit()
         row = (0, '', 0, 0, 0)
     conn.close()
@@ -899,21 +1013,22 @@ def ensure_eco_user(user_id: str):
 
 @bot.tree.command(name="ecodaily", description="Claim your daily reward")
 async def ecodaily(interaction: discord.Interaction):
+    gid = str(interaction.guild_id)
     uid = str(interaction.user.id)
-    ensure_eco_user(uid)
+    ensure_eco_user(gid, uid)
     
     tz = datetime.timezone(datetime.timedelta(hours=0))
     current_day = datetime.datetime.now(tz).strftime("%Y-%m-%d")
     
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-    cursor.execute("SELECT last_daily FROM economy WHERE user_id = ?", (uid,))
+    cursor.execute("SELECT last_daily FROM economy WHERE guild_id = ? AND user_id = ?", (gid, uid))
     last_daily = cursor.fetchone()[0]
     
     if last_daily == current_day:
         conn.close()
         return await interaction.response.send_message("❌ You have already claimed your daily reward today! (Resets at UTC+8 midnight)", ephemeral=True)
         
-    cursor.execute("UPDATE economy SET balance = balance + 100, last_daily = ? WHERE user_id = ?", (current_day, uid))
+    cursor.execute("UPDATE economy SET balance = balance + 100, last_daily = ? WHERE guild_id = ? AND user_id = ?", (current_day, gid, uid))
     conn.commit(); conn.close()
     
     embed = discord.Embed(
@@ -926,12 +1041,13 @@ async def ecodaily(interaction: discord.Interaction):
 
 @bot.tree.command(name="ecowork", description="Go to work and earn money")
 async def ecowork(interaction: discord.Interaction):
+    gid = str(interaction.guild_id)
     uid = str(interaction.user.id)
-    ensure_eco_user(uid)
+    ensure_eco_user(gid, uid)
     now = int(datetime.datetime.now().timestamp())
     
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-    cursor.execute("SELECT last_work FROM economy WHERE user_id = ?", (uid,))
+    cursor.execute("SELECT last_work FROM economy WHERE guild_id = ? AND user_id = ?", (gid, uid))
     last_work = cursor.fetchone()[0]
     
     if now - last_work < 3600:
@@ -942,7 +1058,7 @@ async def ecowork(interaction: discord.Interaction):
     success = random.random() > 0.1
     if success:
         amount = random.randint(200, 2000)
-        cursor.execute("UPDATE economy SET balance = balance + ?, last_work = ? WHERE user_id = ?", (amount, now, uid))
+        cursor.execute("UPDATE economy SET balance = balance + ?, last_work = ? WHERE guild_id = ? AND user_id = ?", (amount, now, gid, uid))
         embed = discord.Embed(
             title="Work",
             color=0x00ffff,
@@ -950,7 +1066,7 @@ async def ecowork(interaction: discord.Interaction):
         )
     else:
         amount = random.randint(50, 100)
-        cursor.execute("UPDATE economy SET balance = MAX(0, balance - ?), last_work = ? WHERE user_id = ?", (amount, now, uid))
+        cursor.execute("UPDATE economy SET balance = MAX(0, balance - ?), last_work = ? WHERE guild_id = ? AND user_id = ?", (amount, now, gid, uid))
         embed = discord.Embed(
             title="Work",
             color=0xff6b6b,
@@ -968,14 +1084,15 @@ async def ecopay(interaction: discord.Interaction, user: discord.Member, value: 
     if value <= 0:
         return await interaction.response.send_message("❌ Payment amount must be positive!", ephemeral=True)
         
+    gid = str(interaction.guild_id)
     uid = str(interaction.user.id)
     tid = str(user.id)
-    ensure_eco_user(uid)
-    ensure_eco_user(tid)
+    ensure_eco_user(gid, uid)
+    ensure_eco_user(gid, tid)
     now = int(datetime.datetime.now().timestamp())
     
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-    cursor.execute("SELECT balance, last_pay FROM economy WHERE user_id = ?", (uid,))
+    cursor.execute("SELECT balance, last_pay FROM economy WHERE guild_id = ? AND user_id = ?", (gid, uid))
     bal, last_pay = cursor.fetchone()
     
     if now - last_pay < 3600:
@@ -990,8 +1107,8 @@ async def ecopay(interaction: discord.Interaction, user: discord.Member, value: 
     tax = int(value * 0.05)
     net_value = value - tax
     
-    cursor.execute("UPDATE economy SET balance = balance - ? , last_pay = ? WHERE user_id = ?", (value, now, uid))
-    cursor.execute("UPDATE economy SET balance = balance + ? WHERE user_id = ?", (net_value, tid))
+    cursor.execute("UPDATE economy SET balance = balance - ? , last_pay = ? WHERE guild_id = ? AND user_id = ?", (value, now, gid, uid))
+    cursor.execute("UPDATE economy SET balance = balance + ? WHERE guild_id = ? AND user_id = ?", (net_value, gid, tid))
     conn.commit(); conn.close()
     
     embed = discord.Embed(
@@ -1007,14 +1124,15 @@ async def ecorob(interaction: discord.Interaction, user: discord.Member):
     if user.id == interaction.user.id:
         return await interaction.response.send_message("❌ You cannot rob yourself!", ephemeral=True)
         
+    gid = str(interaction.guild_id)
     uid = str(interaction.user.id)
     tid = str(user.id)
-    ensure_eco_user(uid)
-    ensure_eco_user(tid)
+    ensure_eco_user(gid, uid)
+    ensure_eco_user(gid, tid)
     now = int(datetime.datetime.now().timestamp())
     
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-    cursor.execute("SELECT balance, last_rob FROM economy WHERE user_id = ?", (uid,))
+    cursor.execute("SELECT balance, last_rob FROM economy WHERE guild_id = ? AND user_id = ?", (gid, uid))
     my_bal, last_rob = cursor.fetchone()
     
     if now - last_rob < 3600:
@@ -1022,7 +1140,7 @@ async def ecorob(interaction: discord.Interaction, user: discord.Member):
         rem = 3600 - (now - last_rob)
         return await interaction.response.send_message(f"❌ You are laying low. Try robbing again in {rem // 60}m {rem % 60}s.", ephemeral=True)
         
-    cursor.execute("SELECT balance FROM economy WHERE user_id = ?", (tid,))
+    cursor.execute("SELECT balance FROM economy WHERE guild_id = ? AND user_id = ?", (gid, tid))
     target_bal = cursor.fetchone()[0]
     
     if target_bal <= 0:
@@ -1034,8 +1152,8 @@ async def ecorob(interaction: discord.Interaction, user: discord.Member):
     
     if success:
         amount = int(target_bal * rate)
-        cursor.execute("UPDATE economy SET balance = balance + ?, last_rob = ? WHERE user_id = ?", (amount, now, uid))
-        cursor.execute("UPDATE economy SET balance = MAX(0, balance - ?) WHERE user_id = ?", (amount, tid))
+        cursor.execute("UPDATE economy SET balance = balance + ?, last_rob = ? WHERE guild_id = ? AND user_id = ?", (amount, now, gid, uid))
+        cursor.execute("UPDATE economy SET balance = MAX(0, balance - ?) WHERE guild_id = ? AND user_id = ?", (amount, gid, tid))
         embed = discord.Embed(
             title="Rob",
             color=0x00ffff,
@@ -1043,7 +1161,7 @@ async def ecorob(interaction: discord.Interaction, user: discord.Member):
         )
     else:
         amount = int(my_bal * rate) if my_bal > 0 else random.randint(50, 200)
-        cursor.execute("UPDATE economy SET balance = MAX(0, balance - ?), last_rob = ? WHERE user_id = ?", (amount, now, uid))
+        cursor.execute("UPDATE economy SET balance = MAX(0, balance - ?), last_rob = ? WHERE guild_id = ? AND user_id = ?", (amount, now, gid, uid))
         embed = discord.Embed(
             title="Rob",
             color=0xff6b6b,
@@ -1057,11 +1175,12 @@ async def ecorob(interaction: discord.Interaction, user: discord.Member):
 @bot.tree.command(name="ecobalance", description="Check account balance or view top rank leaderboard")
 async def ecobalance(interaction: discord.Interaction, user: Optional[discord.Member] = None):
     target = user or interaction.user
+    gid = str(interaction.guild_id)
     uid = str(target.id)
-    ensure_eco_user(uid)
+    ensure_eco_user(gid, uid)
     
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-    cursor.execute("SELECT balance FROM economy WHERE user_id = ?", (uid,))
+    cursor.execute("SELECT balance FROM economy WHERE guild_id = ? AND user_id = ?", (gid, uid))
     bal = cursor.fetchone()[0]
     conn.close()
     
@@ -1080,14 +1199,66 @@ async def ecobalance(interaction: discord.Interaction, user: Optional[discord.Me
 async def setbalance(interaction: discord.Interaction, user: discord.Member, value: int):
     if value < 0:
         return await interaction.response.send_message("❌ Balance cannot be negative!", ephemeral=True)
+    gid = str(interaction.guild_id)
     uid = str(user.id)
-    ensure_eco_user(uid)
+    ensure_eco_user(gid, uid)
     
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-    cursor.execute("UPDATE economy SET balance = ? WHERE user_id = ?", (value, uid))
+    cursor.execute("UPDATE economy SET balance = ? WHERE guild_id = ? AND user_id = ?", (value, gid, uid))
     conn.commit(); conn.close()
     
     await interaction.response.send_message(f"💵 Successfully set {user.name}'s balance to **${value}**.", ephemeral=True)
+
+@bot.tree.command(name="setvoice", description="Let the bot afk in the selected voice channel.")
+@app_commands.describe(channel="Choose the target channel, blank means cancelled.")
+@app_commands.checks.has_permissions(administrator=True)
+async def setvoice(interaction: discord.Interaction, channel: Optional[discord.VoiceChannel] = None):
+    gid = str(interaction.guild_id)
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+
+    if channel is None:
+        vc = discord.utils.get(bot.voice_clients, guild=interaction.guild)
+        if vc: await vc.disconnect(force=True)
+        cursor.execute("DELETE FROM voice_watch WHERE guild_id = ?", (gid,))
+        conn.commit(); conn.close()
+        return await interaction.response.send_message("✅ Cancelled afking.", ephemeral=True)
+
+    existing_vc = discord.utils.get(bot.voice_clients, guild=interaction.guild)
+    active_count = len([vc for vc in bot.voice_clients if vc.is_connected()])
+
+    if not existing_vc and active_count >= MAX_VOICE_WATCH:
+        conn.close()
+        return await interaction.response.send_message(f"❌ Maximum number of channels available for AFK ({MAX_VOICE_WATCH} channels., use `/setvoice` to cancelled some channels and try again later", ephemeral=True)
+
+    try:
+        if existing_vc:
+            await existing_vc.move_to(channel)
+        else:
+            await channel.connect(self_mute=True, self_deaf=True)
+    except discord.ClientException as e:
+        conn.close()
+        return await interaction.response.send_message(f"❌ I can't join {e}.", ephemeral=True)
+
+    cursor.execute("INSERT OR REPLACE INTO voice_watch (guild_id, channel_id) VALUES (?, ?)", (gid, str(channel.id)))
+    conn.commit(); conn.close()
+
+    now = datetime.datetime.now().timestamp()
+    for member in channel.members:
+        if not member.bot:
+            voice_sessions[(gid, str(member.id))] = now
+
+    embed = discord.Embed(
+        title="🔇 AFK",
+        color=0x2ecc71,
+        description=f"Now afking in {channel.mention}."
+    )
+    embed.set_footer(text=f"{interaction.guild.name}｜67")
+    await interaction.response.send_message(embed=embed)
+
+@setvoice.error
+async def setvoice_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.errors.MissingPermissions):
+        await interaction.response.send_message("❌ Bro don't have the permission to do that.", ephemeral=True)
 
 @bot.tree.command(name="addrole", description="Manually add a role to a user")
 @app_commands.checks.has_permissions(administrator=True)
@@ -1121,6 +1292,58 @@ async def on_ready():
     for guild in bot.guilds:
         try: bot.invites[guild.id] = await guild.invites()
         except: pass
+
+    # 🎯 重新連線先前設定的語音追蹤頻道（重啟後恢復，上限 5 個）
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("SELECT guild_id, channel_id FROM voice_watch")
+    watch_rows = cursor.fetchall()
+    conn.close()
+    for gid, cid in watch_rows[:MAX_VOICE_WATCH]:
+        guild = bot.get_guild(int(gid))
+        channel = guild.get_channel(int(cid)) if guild else None
+        if channel:
+            try:
+                await channel.connect(self_mute=True, self_deaf=True)
+                now = datetime.datetime.now().timestamp()
+                for m in channel.members:
+                    if not m.bot:
+                        voice_sessions[(gid, str(m.id))] = now
+            except Exception as e:
+                logger.error(f"[Voice Reconnect 錯誤]: {e}")
+
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    if member.bot:
+        return
+    gid = str(member.guild.id)
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("SELECT channel_id FROM voice_watch WHERE guild_id = ?", (gid,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row or not row[0]:
+        return
+
+    watched_id = int(row[0])
+    key = (gid, str(member.id))
+    now = datetime.datetime.now().timestamp()
+
+    was_in = before.channel is not None and before.channel.id == watched_id
+    is_in = after.channel is not None and after.channel.id == watched_id
+
+    if is_in and not was_in:
+        voice_sessions[key] = now
+    elif was_in and not is_in:
+        start = voice_sessions.pop(key, None)
+        if start:
+            elapsed = int(now - start)
+            if elapsed > 0:
+                conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT INTO voice_time (guild_id, user_id, seconds) VALUES (?, ?, ?) "
+                    "ON CONFLICT(guild_id, user_id) DO UPDATE SET seconds = seconds + excluded.seconds",
+                    (gid, str(member.id), elapsed)
+                )
+                conn.commit(); conn.close()
 
 @bot.event
 async def on_member_join(member: discord.Member):
@@ -1519,7 +1742,7 @@ async def on_message(message: discord.Message):
     uid = str(message.author.id)
     gid = str(message.guild.id)
     
-    cursor.execute("SELECT xp, level, count_67 FROM levels WHERE user_id = ?", (uid,))
+    cursor.execute("SELECT xp, level, count_67 FROM levels WHERE guild_id = ? AND user_id = ?", (gid, uid))
     row = cursor.fetchone()
     xp, lvl, count_67 = row if row else (0, 1, 0)
 
@@ -1538,7 +1761,7 @@ async def on_message(message: discord.Message):
         new_xp -= get_xp_needed(new_lvl, is_admin)
         new_lvl += 1
 
-    cursor.execute("INSERT OR REPLACE INTO levels (user_id, xp, level, count_67) VALUES (?, ?, ?, ?)", (uid, new_xp, new_lvl, count_67))
+    cursor.execute("INSERT OR REPLACE INTO levels (guild_id, user_id, xp, level, count_67) VALUES (?, ?, ?, ?, ?)", (gid, uid, new_xp, new_lvl, count_67))
     conn.commit()
 
     if new_lvl > lvl:
