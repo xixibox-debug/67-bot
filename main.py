@@ -358,6 +358,7 @@ class SixSevenBot(commands.Bot):
     async def setup_hook(self):
         self.rotate_status.start()
         self.check_time_announcements.start()
+        self.add_view(OrderActionView())
         await self.tree.sync()
 
     @tasks.loop(seconds=20)
@@ -1026,6 +1027,132 @@ class SettingsView(ui.View):
         embed = discord.Embed(title="⏰ Time Message Alerts Hub", color=0x3498db, description="Schedule timed standard text warnings or clear past records below.")
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=TimeMessageConfigView(interaction.guild_id))
+
+# =================================================================
+# 🛒 OSLF飛機銷售專用
+# =================================================================
+
+# 限定目標伺服器 ID 與論壇頻道 ID
+TARGET_GUILD_ID = 1458114486442524904
+TARGET_FORUM_ID = 1496743164713766952
+
+# 標籤對應訊息設定 (Tag ID : 發送內容)
+TAG_CONFIG = {
+    1496744588751274057:
+        "Pls check the latest delivery time at"
+        " https://discord.com/channels/1458114486442524904/1520931414953168997"
+        " first.\n\n<@&1505934626202452079>，有人要買飛機啦",
+    1496883730068013247:
+        "<@936410788242001970>，有人要賣飛機啦",
+    1496883628523917464:
+        "<@&1513789778225659904>, do you guys want to help?",
+}
+
+EXTRA_INSTRUCTIONS = (
+    "\n\n- 如果您願意協助銷售/代銷，請按下`接手` If you are willing to assist with"
+    " sales/reselling, please press `Take Over`.\n- 如果訂單已完成，請按下`已完成`"
+    " If the order is completed, please press `Completed`."
+)
+
+
+class OrderActionView(ui.View):
+
+  def __init__(self):
+    super().__init__(timeout=None)  # timeout=None 保持按鈕長效持久化
+
+  @ui.button(
+      label="接手 Take Over",
+      style=discord.ButtonStyle.primary,
+      custom_id="order_system:takeover",
+  )
+  async def takeover_button(
+      self, interaction: discord.Interaction, button: ui.Button
+  ):
+    # 限制 1：非指定伺服器不執行
+    if interaction.guild_id != TARGET_GUILD_ID:
+      return await interaction.response.send_message(
+          "❌ Only for selected server", ephemeral=True
+      )
+
+    # 限制 2：已結案則不允許接手
+    if "【🟢 狀態：已完成結案】" in interaction.message.content:
+      return await interaction.response.send_message(
+          "❌ Completed", ephemeral=True
+      )
+
+    user_mention = interaction.user.mention
+    current_content = interaction.message.content
+
+    # 更新內容紀錄接手者
+    if "👉 **接手人**" not in current_content:
+      new_content = current_content + f"\n\n👉 **接手人/Taken over by**: {user_mention}"
+    else:
+      new_content = current_content + f", {user_mention}"
+
+    await interaction.response.edit_message(content=new_content, view=self)
+    await interaction.followup.send(
+        f"✅ {user_mention} 已接手此訂單！{user_mention} has taken over this order.", ephemeral=False
+    )
+
+  @ui.button(
+      label="已完成 Completed",
+      style=discord.ButtonStyle.success,
+      custom_id="order_system:complete",
+  )
+  async def complete_button(
+      self, interaction: discord.Interaction, button: ui.Button
+  ):
+    # 限制 1：非指定伺服器不執行
+    if interaction.guild_id != TARGET_GUILD_ID:
+      return await interaction.response.send_message(
+          "❌ Only for selected server", ephemeral=True
+      )
+
+    # 限制 2：防呆避免重複點擊
+    if "【🟢 狀態：已完成結案】" in interaction.message.content:
+      return await interaction.response.send_message(
+          "❌ Completed", ephemeral=True
+      )
+
+    current_content = interaction.message.content
+
+    # 1. 替換/標記結案狀態
+    if "訊息已接收" in current_content:
+      new_content = current_content.replace(
+          "訊息已接收", "【🟢 狀態/Status：已完成 Completed】"
+      )
+    else:
+      new_content = current_content + "\n\n【🟢 狀態/Status：已完成 Completed】"
+
+    # 2. 停用按鈕並變更灰色
+    button.disabled = True
+    button.style = discord.ButtonStyle.secondary
+    button.label = "已完成 Completed"
+
+    # 3. 編輯訊息與回應
+    await interaction.response.edit_message(content=new_content, view=self)
+    await interaction.followup.send(
+        "✅ 訂單已完成，貼文已鎖定並關閉。 This order has been completed, post locked."
+    )
+
+    # 4. 鎖定 (Lock) 並關閉/歸檔 (Archive) 討論串/論壇貼文
+    if isinstance(interaction.channel, discord.Thread):
+      thread = interaction.channel
+      new_name = (
+          thread.name
+          if thread.name.startswith("[Complete]")
+          else f"[Complete] {thread.name}"
+      )
+      try:
+        # locked=True (鎖定), archived=True (關閉貼文)
+        await thread.edit(name=new_name, locked=True, archived=True)
+      except discord.Forbidden:
+        logger.error(
+            "nah, I don't have permission to lock or close this thread."
+        )
+      except Exception as e:
+        logger.error(f"[OrderComplete Error]: {e}")
+
 # =================================================================
 # 🚀 6. SLASH COMMANDS
 # =================================================================
@@ -2446,6 +2573,27 @@ async def streaks(interaction: discord.Interaction, user: Optional[discord.Membe
     view = StreaksBoardView(target, interaction.guild)
     embed = view.build_personal_embed()
     await interaction.response.send_message(embed=embed, view=view)
+
+@bot.event
+async def on_thread_create(thread: discord.Thread):
+  """當論壇有新貼文建立時觸發"""
+  # 判定：必須在伺服器 1458114486442524904 且頻道為目標論壇時才觸發
+  if thread.guild.id != TARGET_GUILD_ID or thread.parent_id != TARGET_FORUM_ID:
+    return
+
+  # 取得貼文標籤 IDs
+  applied_tag_ids = [tag.id for tag in thread.applied_tags]
+
+  msg_to_send = ""
+  for tag_id in applied_tag_ids:
+    if tag_id in TAG_CONFIG:
+      msg_to_send = TAG_CONFIG[tag_id]
+      break  # 匹配到第一個目標標籤即跳出
+
+  if msg_to_send:
+    full_content = msg_to_send + EXTRA_INSTRUCTIONS
+    # 發送訊息與接手/完成按鈕
+    await thread.send(content=full_content, view=OrderActionView())
     
 # =================================================================
 # 🔑 8. RUN BOT
