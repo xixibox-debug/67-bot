@@ -1071,13 +1071,13 @@ class OrderActionView(ui.View):
     # 限制 1：非指定伺服器不執行
     if interaction.guild_id != TARGET_GUILD_ID:
       return await interaction.response.send_message(
-          "❌ Only for selected server", ephemeral=True
+          "❌ Only for selected server.", ephemeral=True
       )
 
     # 限制 2：已結案則不允許接手
-    if "【🟢 狀態：已完成結案】" in interaction.message.content:
+    if "【🟢 狀態/Status：已完成 Completed】" in interaction.message.content:
       return await interaction.response.send_message(
-          "❌ Completed", ephemeral=True
+          "❌ 此訂單已經完成過了。 This order has completed.", ephemeral=True
       )
 
     user_mention = interaction.user.mention
@@ -1085,13 +1085,13 @@ class OrderActionView(ui.View):
 
     # 更新內容紀錄接手者
     if "👉 **接手人**" not in current_content:
-      new_content = current_content + f"\n\n👉 **接手人/Taken over by**: {user_mention}"
+      new_content = current_content + f"\n\n👉 **接手人**: {user_mention}"
     else:
       new_content = current_content + f", {user_mention}"
 
     await interaction.response.edit_message(content=new_content, view=self)
     await interaction.followup.send(
-        f"✅ {user_mention} 已接手此訂單！{user_mention} has taken over this order.", ephemeral=False
+        f"✅ {user_mention} 已接手此訂單！  {user_mention} has taken over this order.", ephemeral=False
     )
 
   @ui.button(
@@ -1105,13 +1105,13 @@ class OrderActionView(ui.View):
     # 限制 1：非指定伺服器不執行
     if interaction.guild_id != TARGET_GUILD_ID:
       return await interaction.response.send_message(
-          "❌ Only for selected server", ephemeral=True
+          "❌ Only for selected server.", ephemeral=True
       )
 
     # 限制 2：防呆避免重複點擊
-    if "【🟢 狀態：已完成結案】" in interaction.message.content:
+    if "【🟢 狀態/Status：已完成 Completed】" in interaction.message.content:
       return await interaction.response.send_message(
-          "❌ Completed", ephemeral=True
+          "❌ 此訂單已經完成過了。 This order has completed.", ephemeral=True
       )
 
     current_content = interaction.message.content
@@ -1124,10 +1124,13 @@ class OrderActionView(ui.View):
     else:
       new_content = current_content + "\n\n【🟢 狀態/Status：已完成 Completed】"
 
-    # 2. 停用按鈕並變更灰色
-    button.disabled = True
-    button.style = discord.ButtonStyle.secondary
-    button.label = "已完成 Completed"
+    # 🎯 2. 將此 View 下的所有按鈕全部停用 (Disabled)
+    for child in self.children:
+      if isinstance(child, ui.Button):
+        child.disabled = True
+        # 如果是完成按鈕，將顏色改為灰色
+        if child.custom_id == "order_system:complete":
+          child.style = discord.ButtonStyle.secondary
 
     # 3. 編輯訊息與回應
     await interaction.response.edit_message(content=new_content, view=self)
