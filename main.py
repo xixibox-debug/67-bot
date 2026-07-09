@@ -55,6 +55,13 @@ MAX_VOICE_WATCH = 5  # 全機器人同時間最多監聽 5 個語音頻道
 # =================================================================
 # 🗄️ 2. DATABASE INITIALIZATION (資料庫初始化)
 # =================================================================
+
+def ensure_column(cursor, table: str, column: str, col_def: str):
+    """安全地為既有資料表新增欄位（不存在才新增，不會清掉舊資料）"""
+    cursor.execute(f"PRAGMA table_info({table})")
+    if column not in [c[1] for c in cursor.fetchall()]:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}")
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -65,6 +72,7 @@ def init_db():
         )
     """)
     cursor.execute("CREATE TABLE IF NOT EXISTS levelup (guild_id TEXT PRIMARY KEY, channel_id TEXT, message TEXT)")
+    ensure_column(cursor, "levelup", "reply_mode", "INTEGER DEFAULT 0")  # 🎯 0=發到頻道, 1=在該訊息下回覆
     cursor.execute("CREATE TABLE IF NOT EXISTS announcements (id INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT, message TEXT, channel_id TEXT)")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS levels (
@@ -143,6 +151,54 @@ def init_db():
             PRIMARY KEY (guild_id, user_id)
         )
     """)
+    # 🎯 新增：/settings 四大功能 + Streaks 的獨立開關（每個伺服器隔離）
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS feature_toggles (
+            guild_id TEXT,
+            feature TEXT,
+            enabled INTEGER DEFAULT 1,
+            PRIMARY KEY (guild_id, feature)
+        )
+    """)
+    # 🔥 新增：Streaks 系統
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS streaks_settings (
+            guild_id TEXT PRIMARY KEY,
+            messages_needed INTEGER DEFAULT 20,
+            notify_channel_id TEXT,
+            nick_threshold INTEGER DEFAULT 3,
+            nick_emoji TEXT DEFAULT '🔥'
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS streaks_data (
+            guild_id TEXT,
+            user_id TEXT,
+            current_streak INTEGER DEFAULT 0,
+            longest_streak INTEGER DEFAULT 0,
+            messages_today INTEGER DEFAULT 0,
+            last_message_date TEXT DEFAULT '',
+            last_streak_date TEXT DEFAULT '',
+            PRIMARY KEY (guild_id, user_id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS streaks_roles (
+            guild_id TEXT,
+            streak_count INTEGER,
+            role_id TEXT,
+            PRIMARY KEY (guild_id, streak_count)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS streaks_weekly (
+            guild_id TEXT,
+            user_id TEXT,
+            week_start TEXT,
+            day_status TEXT DEFAULT '0000000',
+            PRIMARY KEY (guild_id, user_id, week_start)
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -170,6 +226,92 @@ async def check_level_roles(member: discord.Member, level: int):
                 await member.add_roles(role)
             except discord.Forbidden:
                 logger.error(f"nah, I can't give **{role.name}** to **{member.name}**")
+
+
+def is_feature_enabled(guild_id, feature: str) -> bool:
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("SELECT enabled FROM feature_toggles WHERE guild_id = ? AND feature = ?", (str(guild_id), feature))
+    row = cursor.fetchone(); conn.close()
+    return (row[0] == 1) if row else True  # 預設開啟
+
+
+def set_feature_enabled(guild_id, feature: str, enabled: bool):
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO feature_toggles (guild_id, feature, enabled) VALUES (?, ?, ?) "
+        "ON CONFLICT(guild_id, feature) DO UPDATE SET enabled = excluded.enabled",
+        (str(guild_id), feature, 1 if enabled else 0)
+    )
+    conn.commit(); conn.close()
+
+
+async def check_streak_roles(member: discord.Member, streak_count: int):
+    """達成連擊天數時發放對應身分組"""
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("SELECT role_id FROM streaks_roles WHERE guild_id = ? AND streak_count = ?", (str(member.guild.id), streak_count))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        role = member.guild.get_role(int(row[0]))
+        if role and role not in member.roles:
+            try:
+                await member.add_roles(role)
+            except discord.Forbidden:
+                logger.error(f"nah, I can't give **{role.name}** to **{member.name}**")
+
+
+async def revoke_streak_roles(member: discord.Member, up_to_streak: int):
+    """連擊斷掉時，收回所有已經拿到的連擊身分組"""
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("SELECT role_id FROM streaks_roles WHERE guild_id = ? AND streak_count <= ?", (str(member.guild.id), up_to_streak))
+    rows = cursor.fetchall(); conn.close()
+    for (rid,) in rows:
+        role = member.guild.get_role(int(rid))
+        if role and role in member.roles:
+            try:
+                await member.remove_roles(role)
+            except discord.Forbidden:
+                logger.error(f"nah, I can't remove **{role.name}** from **{member.name}**")
+
+
+async def apply_streak_nickname(member: discord.Member, cur_streak: int):
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("SELECT nick_threshold, nick_emoji FROM streaks_settings WHERE guild_id = ?", (str(member.guild.id),))
+    row = cursor.fetchone(); conn.close()
+    if not row or not row[1] or cur_streak < row[0]: return
+    prefix = f"{row[1]} "
+    current_nick = member.display_name
+    if not current_nick.startswith(prefix):
+        try:
+            await member.edit(nick=(prefix + current_nick)[:32])
+        except discord.Forbidden:
+            pass
+
+
+async def revert_streak_nickname(member: discord.Member):
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("SELECT nick_emoji FROM streaks_settings WHERE guild_id = ?", (str(member.guild.id),))
+    row = cursor.fetchone(); conn.close()
+    if not row or not row[0]: return
+    prefix = f"{row[0]} "
+    current_nick = member.display_name
+    if current_nick.startswith(prefix):
+        try:
+            await member.edit(nick=current_nick[len(prefix):] or None)
+        except discord.Forbidden:
+            pass
+
+
+def get_week_start(dt: datetime.datetime) -> str:
+    monday = dt - datetime.timedelta(days=dt.weekday())
+    return monday.strftime("%Y-%m-%d")
+
+
+def build_week_line(day_status: str) -> str:
+    days = ["M", "T", "W", "T", "F", "S", "S"]
+    day_line = "  ".join(days)
+    status_line = "  ".join("✅" if c == "1" else "❌" for c in day_status)
+    return f"```\n{day_line}\n{status_line}\n```"
 
 
 def parse_placeholders(text: str, member: discord.Member, guild: discord.Guild, inviter: discord.Member = None, extra: dict = None) -> str:
@@ -239,7 +381,8 @@ class SixSevenBot(commands.Bot):
             self.last_announced_minute = now
             for cid, msg in rows:
                 channel = self.get_channel(int(cid)) or await self.fetch_channel(int(cid))
-                if channel: await channel.send(msg)
+                if channel and is_feature_enabled(channel.guild.id, "timemsg"):
+                    await channel.send(msg)
 
 bot = SixSevenBot()
 
@@ -354,6 +497,7 @@ class WelcomeGoodbyeModal(ui.Modal, title="Set Welcome Message"):
 class WelcomeConfigView(ui.View):
     def __init__(self, guild_id: int = None):
         super().__init__(timeout=300)
+        self.guild_id = guild_id
         if guild_id:
             conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
             cursor.execute("SELECT channel_id FROM welcome WHERE guild_id = ?", (str(guild_id),))
@@ -361,6 +505,9 @@ class WelcomeConfigView(ui.View):
             conn.close()
             if row and row[0]:
                 self.set_channel.default_values = [discord.Object(id=int(row[0]))]
+            enabled = is_feature_enabled(guild_id, "welcome")
+            self.toggle_enabled.label = "✅ Enabled" if enabled else "❌ Disabled"
+            self.toggle_enabled.style = discord.ButtonStyle.success if enabled else discord.ButtonStyle.danger
 
     @ui.select(cls=ui.ChannelSelect, channel_types=[discord.ChannelType.text], placeholder="🎯 Select Welcome Alert Channel")
     async def set_channel(self, interaction: discord.Interaction, select: ui.ChannelSelect):
@@ -388,9 +535,17 @@ class WelcomeConfigView(ui.View):
         conn.commit(); conn.close()
         await interaction.response.send_message("🗑️ Welcome/Goodbye feature disabled.", ephemeral=True)
 
+    @ui.button(label="✅ Enabled", style=discord.ButtonStyle.success)
+    async def toggle_enabled(self, interaction: discord.Interaction, button: ui.Button):
+        cur = is_feature_enabled(interaction.guild_id, "welcome")
+        set_feature_enabled(interaction.guild_id, "welcome", not cur)
+        button.label = "✅ Enabled" if not cur else "❌ Disabled"
+        button.style = discord.ButtonStyle.success if not cur else discord.ButtonStyle.danger
+        await interaction.response.edit_message(view=self)
+
     @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
-        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nAuto Mute\nTime Message")
+        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nAuto Mute\nTime Message")
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=SettingsView())
 
@@ -399,9 +554,11 @@ class LevelMessageModal(ui.Modal, title="Set Level Up Message"):
     level_msg = ui.TextInput(label="Enter Level Up Message *", placeholder="Congrats {user.mention}! Level {level}!", required=True, style=discord.TextStyle.long)
     async def on_submit(self, interaction: discord.Interaction):
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-        cursor.execute("SELECT channel_id FROM levelup WHERE guild_id = ?", (str(interaction.guild_id),))
-        row = cursor.fetchone(); cid = row[0] if row else None
-        cursor.execute("INSERT OR REPLACE INTO levelup VALUES (?, ?, ?)", (str(interaction.guild_id), cid, self.level_msg.value))
+        cursor.execute("SELECT channel_id, reply_mode FROM levelup WHERE guild_id = ?", (str(interaction.guild_id),))
+        row = cursor.fetchone()
+        cid = row[0] if row else None
+        reply_mode = row[1] if row else 0
+        cursor.execute("INSERT OR REPLACE INTO levelup (guild_id, channel_id, message, reply_mode) VALUES (?, ?, ?, ?)", (str(interaction.guild_id), cid, self.level_msg.value, reply_mode))
         conn.commit(); conn.close()
         preview = parse_placeholders(self.level_msg.value, interaction.user, interaction.guild, extra={"level": "5"})
         await interaction.response.send_message(f"✅ **Message Saved!** Preview: {preview}", ephemeral=True)
@@ -410,21 +567,30 @@ class LevelMessageModal(ui.Modal, title="Set Level Up Message"):
 class LevelSettingsView(ui.View):
     def __init__(self, guild_id: int = None):
         super().__init__(timeout=180)
+        self.guild_id = guild_id
         if guild_id:
             conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-            cursor.execute("SELECT channel_id FROM levelup WHERE guild_id = ?", (str(guild_id),))
+            cursor.execute("SELECT channel_id, reply_mode FROM levelup WHERE guild_id = ?", (str(guild_id),))
             row = cursor.fetchone()
             conn.close()
             if row and row[0]:
                 self.select_level_channel.default_values = [discord.Object(id=int(row[0]))]
+            reply_mode = row[1] if row else 0
+            self.toggle_reply.label = "💬 Reply Under Message: On" if reply_mode else "💬 Reply Under Message: Off"
+            self.toggle_reply.style = discord.ButtonStyle.success if reply_mode else discord.ButtonStyle.secondary
+            enabled = is_feature_enabled(guild_id, "level")
+            self.toggle_enabled.label = "✅ Enabled" if enabled else "❌ Disabled"
+            self.toggle_enabled.style = discord.ButtonStyle.success if enabled else discord.ButtonStyle.danger
 
     @ui.select(cls=ui.ChannelSelect, channel_types=[discord.ChannelType.text], placeholder="Select Level Up Channel 📢")
     async def select_level_channel(self, interaction: discord.Interaction, select: ui.ChannelSelect):
         cid = select.values[0].id
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-        cursor.execute("SELECT message FROM levelup WHERE guild_id = ?", (str(interaction.guild_id),))
-        row = cursor.fetchone(); msg = row[0] if row else "Level up to {level}!"
-        cursor.execute("INSERT OR REPLACE INTO levelup VALUES (?, ?, ?)", (str(interaction.guild_id), str(cid), msg))
+        cursor.execute("SELECT message, reply_mode FROM levelup WHERE guild_id = ?", (str(interaction.guild_id),))
+        row = cursor.fetchone()
+        msg = row[0] if row else "Level up to {level}!"
+        reply_mode = row[1] if row else 0
+        cursor.execute("INSERT OR REPLACE INTO levelup (guild_id, channel_id, message, reply_mode) VALUES (?, ?, ?, ?)", (str(interaction.guild_id), str(cid), msg, reply_mode))
         conn.commit(); conn.close()
         await interaction.response.send_message(f"✅ Level channel set to {select.values[0].mention}", ephemeral=True)
         
@@ -437,16 +603,38 @@ class LevelSettingsView(ui.View):
         )
         await interaction.response.edit_message(embed=embed, view=LevelRoleSettingsView(self))
 
-    @ui.button(label="Modify Level Message", style=discord.ButtonStyle.success)
+    @ui.button(label="Modify Level Message", style=discord.ButtonStyle.success, row=1)
     async def mod_text(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(LevelMessageModal())
 
+    @ui.button(label="💬 Reply Under Message: Off", style=discord.ButtonStyle.secondary, row=1)
+    async def toggle_reply(self, interaction: discord.Interaction, button: ui.Button):
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute("SELECT channel_id, message, reply_mode FROM levelup WHERE guild_id = ?", (str(interaction.guild_id),))
+        row = cursor.fetchone()
+        cid = row[0] if row else None
+        msg = row[1] if row else "Level up to {level}!"
+        cur_mode = row[2] if row else 0
+        new_mode = 0 if cur_mode else 1
+        cursor.execute("INSERT OR REPLACE INTO levelup (guild_id, channel_id, message, reply_mode) VALUES (?, ?, ?, ?)", (str(interaction.guild_id), cid, msg, new_mode))
+        conn.commit(); conn.close()
+        button.label = "💬 Reply Under Message: On" if new_mode else "💬 Reply Under Message: Off"
+        button.style = discord.ButtonStyle.success if new_mode else discord.ButtonStyle.secondary
+        await interaction.response.edit_message(view=self)
+
+    @ui.button(label="✅ Enabled", style=discord.ButtonStyle.success, row=1)
+    async def toggle_enabled(self, interaction: discord.Interaction, button: ui.Button):
+        cur = is_feature_enabled(interaction.guild_id, "level")
+        set_feature_enabled(interaction.guild_id, "level", not cur)
+        button.label = "✅ Enabled" if not cur else "❌ Disabled"
+        button.style = discord.ButtonStyle.success if not cur else discord.ButtonStyle.danger
+        await interaction.response.edit_message(view=self)
+
     @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=2)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
-        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nAuto Mute\nTime Message")
+        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nAuto Mute\nTime Message")
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=SettingsView())
-
 
 class LevelRoleModal(ui.Modal, title="Set give role to select level"):
     level_input = ui.TextInput(label="Tell me the level?", placeholder="ex: 10", min_length=1, max_length=3)
@@ -522,6 +710,9 @@ class AutoMuteConfigView(ui.View):
         self.select_menu = BannedWordDeleteSelect()
         self.add_item(self.select_menu)
         self.update_select_menu()
+        enabled = is_feature_enabled(guild_id, "automute")
+        self.toggle_enabled.label = "✅ Enabled" if enabled else "❌ Disabled"
+        self.toggle_enabled.style = discord.ButtonStyle.success if enabled else discord.ButtonStyle.danger
 
     def update_select_menu(self):
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
@@ -536,9 +727,18 @@ class AutoMuteConfigView(ui.View):
 
     @ui.button(label="➕ Add Banned Word", style=discord.ButtonStyle.success, row=0)
     async def add_word(self, interaction: discord.Interaction, button: ui.Button): await interaction.response.send_modal(AutoMuteModal(self))
+
+    @ui.button(label="✅ Enabled", style=discord.ButtonStyle.success, row=0)
+    async def toggle_enabled(self, interaction: discord.Interaction, button: ui.Button):
+        cur = is_feature_enabled(self.guild_id, "automute")
+        set_feature_enabled(self.guild_id, "automute", not cur)
+        button.label = "✅ Enabled" if not cur else "❌ Disabled"
+        button.style = discord.ButtonStyle.success if not cur else discord.ButtonStyle.danger
+        await interaction.response.edit_message(view=self)
+
     @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=0)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
-        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nAuto Mute\nTime Message")
+        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nAuto Mute\nTime Message")
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=SettingsView())
 
@@ -579,6 +779,9 @@ class TimeMessageConfigView(ui.View):
         self.select_menu = TimeMessageDeleteSelect()
         self.add_item(self.select_menu)
         self.update_select_menu()
+        enabled = is_feature_enabled(guild_id, "timemsg")
+        self.toggle_enabled.label = "✅ Enabled" if enabled else "❌ Disabled"
+        self.toggle_enabled.style = discord.ButtonStyle.success if enabled else discord.ButtonStyle.danger
 
     def update_select_menu(self):
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
@@ -599,12 +802,198 @@ class TimeMessageConfigView(ui.View):
 
     @ui.button(label="⏰ Add Time Message", style=discord.ButtonStyle.success, row=0)
     async def add_time(self, interaction: discord.Interaction, button: ui.Button): await interaction.response.send_modal(AnnouncementModal(self))
+
+    @ui.button(label="✅ Enabled", style=discord.ButtonStyle.success, row=0)
+    async def toggle_enabled(self, interaction: discord.Interaction, button: ui.Button):
+        cur = is_feature_enabled(self.guild_id, "timemsg")
+        set_feature_enabled(self.guild_id, "timemsg", not cur)
+        button.label = "✅ Enabled" if not cur else "❌ Disabled"
+        button.style = discord.ButtonStyle.success if not cur else discord.ButtonStyle.danger
+        await interaction.response.edit_message(view=self)
+
     @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=0)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
-        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nAuto Mute\nTime Message")
+        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nAuto Mute\nTime Message")
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=SettingsView())
 
+# =================================================================
+# 🔥 Streaks 系統 UI
+# =================================================================
+
+class StreaksNumberModal(ui.Modal, title="Set Daily Streaks Message Count"):
+    value = ui.TextInput(label="Messages needed per day (1-999)", required=True, max_length=3)
+
+    def __init__(self, view: 'StreaksMainView'):
+        super().__init__()
+        self.view = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not self.value.value.isdigit() or int(self.value.value) < 1:
+            return await interaction.response.send_message("❌ Please enter a valid positive number.", ephemeral=True)
+        val = int(self.value.value)
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO streaks_settings (guild_id, messages_needed) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET messages_needed = excluded.messages_needed",
+            (str(self.view.guild_id), val)
+        )
+        conn.commit(); conn.close()
+        embed = self.view.build_embed(interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=self.view)
+
+
+class StreaksNicknameModal(ui.Modal, title="Set Nickname Emoji Condition"):
+    threshold = ui.TextInput(label="Show emoji if streak days >=", required=True, max_length=3)
+    emoji = ui.TextInput(label="Emoji to prepend (e.g. 🔥)", required=True, max_length=10)
+
+    def __init__(self, view: 'StreaksMainView'):
+        super().__init__()
+        self.view = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not self.threshold.value.isdigit() or int(self.threshold.value) < 1:
+            return await interaction.response.send_message("❌ Please enter a valid positive number for the threshold.", ephemeral=True)
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO streaks_settings (guild_id, nick_threshold, nick_emoji) VALUES (?, ?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET nick_threshold = excluded.nick_threshold, nick_emoji = excluded.nick_emoji",
+            (str(self.view.guild_id), int(self.threshold.value), self.emoji.value)
+        )
+        conn.commit(); conn.close()
+        embed = self.view.build_embed(interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=self.view)
+
+
+class StreaksChannelSelectView(ui.View):
+    def __init__(self, guild_id: int, parent_view: 'StreaksMainView'):
+        super().__init__(timeout=120)
+        self.guild_id = guild_id
+        self.parent_view = parent_view
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute("SELECT notify_channel_id FROM streaks_settings WHERE guild_id = ?", (str(guild_id),))
+        row = cursor.fetchone(); conn.close()
+        if row and row[0]:
+            self.select_channel.default_values = [discord.Object(id=int(row[0]))]
+
+    @ui.select(cls=ui.ChannelSelect, channel_types=[discord.ChannelType.text], placeholder="🔔 Select Notification Channel")
+    async def select_channel(self, interaction: discord.Interaction, select: ui.ChannelSelect):
+        cid = select.values[0].id
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO streaks_settings (guild_id, notify_channel_id) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET notify_channel_id = excluded.notify_channel_id",
+            (str(self.guild_id), str(cid))
+        )
+        conn.commit(); conn.close()
+        embed = self.parent_view.build_embed(interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=self.parent_view)
+
+    @ui.button(label="🔙 Back", style=discord.ButtonStyle.gray)
+    async def back(self, interaction: discord.Interaction, button: ui.Button):
+        embed = self.parent_view.build_embed(interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=self.parent_view)
+
+
+class StreaksRoleModal(ui.Modal, title="Set streak requirement for role"):
+    streak_count = ui.TextInput(label="Required streak count", required=True, max_length=3)
+
+    def __init__(self, role: discord.Role, view: 'StreaksRoleSettingsView'):
+        super().__init__()
+        self.role = role
+        self.view = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not self.streak_count.value.isdigit():
+            return await interaction.response.send_message("❌ Please enter a valid number.", ephemeral=True)
+        count = int(self.streak_count.value)
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO streaks_roles (guild_id, streak_count, role_id) VALUES (?, ?, ?)", (str(interaction.guild_id), count, str(self.role.id)))
+        conn.commit(); conn.close()
+        await interaction.response.send_message(f"✅ **{self.role.name}** will be given at a **{count}**-day streak, and removed automatically if the streak breaks.", ephemeral=True)
+
+
+class StreaksRoleSettingsView(ui.View):
+    def __init__(self, parent_view: 'StreaksMainView'):
+        super().__init__(timeout=120)
+        self.parent_view = parent_view
+
+    @ui.select(cls=ui.RoleSelect, placeholder="請選擇要綁定的身分組...", min_values=1, max_values=1)
+    async def select_role(self, interaction: discord.Interaction, select: ui.RoleSelect):
+        await interaction.response.send_modal(StreaksRoleModal(select.values[0], self))
+
+    @ui.button(label="🔙 Back", style=discord.ButtonStyle.gray)
+    async def back(self, interaction: discord.Interaction, button: ui.Button):
+        embed = self.parent_view.build_embed(interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=self.parent_view)
+
+
+class StreaksMainView(ui.View):
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=180)
+        self.guild_id = guild_id
+        enabled = is_feature_enabled(guild_id, "streaks")
+        self.toggle_enabled.label = "✅ Status: On" if enabled else "❌ Status: Off"
+        self.toggle_enabled.style = discord.ButtonStyle.success if enabled else discord.ButtonStyle.danger
+
+    def build_embed(self, guild: discord.Guild) -> discord.Embed:
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute("SELECT messages_needed, notify_channel_id, nick_threshold, nick_emoji FROM streaks_settings WHERE guild_id = ?", (str(self.guild_id),))
+        row = cursor.fetchone(); conn.close()
+        msgneeded, channel_id, nick_threshold, nick_emoji = row if row else (20, None, 3, '🔥')
+        status = "on" if is_feature_enabled(self.guild_id, "streaks") else "off"
+        ch_text = f"<#{channel_id}>" if channel_id else "Not set"
+
+        embed = discord.Embed(
+            title="🔥 Streaks System Settings",
+            color=0xff6600,
+            description=(
+                f"Status: **{status}**\n"
+                f"Daily streaks message: **{msgneeded}**\n"
+                f"Show emoji {nick_emoji} if streaks more than **{nick_threshold}** days\n"
+                f"Notification channel: {ch_text}"
+            )
+        )
+        embed.set_footer(text=f"{guild.name}｜67")
+        return embed
+
+    @ui.button(label="📢 Notification Channel", style=discord.ButtonStyle.blurple, row=0)
+    async def set_channel(self, interaction: discord.Interaction, button: ui.Button):
+        embed = discord.Embed(title="🔔 Select Notification Channel", color=0x2b2d31)
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
+        await interaction.response.edit_message(embed=embed, view=StreaksChannelSelectView(self.guild_id, self))
+
+    @ui.button(label="✏️ Daily Message Count", style=discord.ButtonStyle.blurple, row=0)
+    async def set_msgneeded(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_modal(StreaksNumberModal(self))
+
+    @ui.button(label="😀 Nickname Emoji Condition", style=discord.ButtonStyle.blurple, row=0)
+    async def set_nickname_condition(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_modal(StreaksNicknameModal(self))
+
+    @ui.button(label="🎭 Role Rewards", style=discord.ButtonStyle.secondary, row=1)
+    async def role_rewards(self, interaction: discord.Interaction, button: ui.Button):
+        embed = discord.Embed(
+            title="🎭 Streaks Role Rewards", 
+            description="Choose a **role** below and then set the required **streak count**.\n⚠️ The role will be **automatically removed** if the streak breaks.", 
+            color=0x2b2d31
+        )
+        await interaction.response.edit_message(embed=embed, view=StreaksRoleSettingsView(self))
+
+    @ui.button(label="✅ Status: On", style=discord.ButtonStyle.success, row=1)
+    async def toggle_enabled(self, interaction: discord.Interaction, button: ui.Button):
+        cur = is_feature_enabled(self.guild_id, "streaks")
+        set_feature_enabled(self.guild_id, "streaks", not cur)
+        button.label = "✅ Status: On" if not cur else "❌ Status: Off"
+        button.style = discord.ButtonStyle.success if not cur else discord.ButtonStyle.danger
+        embed = self.build_embed(interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @ui.button(label="🔙 Back", style=discord.ButtonStyle.gray, row=2)
+    async def back(self, interaction: discord.Interaction, button: ui.Button):
+        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nAuto Mute\nTime Message")
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
+        await interaction.response.edit_message(embed=embed, view=SettingsView())
 
 class SettingsView(ui.View):
     def __init__(self): super().__init__(timeout=None)
@@ -619,6 +1008,12 @@ class SettingsView(ui.View):
         embed = discord.Embed(title="📈 Level System Configuration", color=0x2ecc71, description="Set level up channel, message, and level-role rewards below.")
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=LevelSettingsView(interaction.guild_id))
+
+    @ui.button(label="Streaks", style=discord.ButtonStyle.secondary, emoji="🔥")
+    async def btn_s(self, interaction: discord.Interaction, btn: ui.Button):
+        view = StreaksMainView(interaction.guild_id)
+        embed = view.build_embed(interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=view)
         
     @ui.button(label="Auto Mute", style=discord.ButtonStyle.secondary, emoji="🔒")
     async def btn_a(self, interaction: discord.Interaction, btn: ui.Button):
@@ -631,7 +1026,6 @@ class SettingsView(ui.View):
         embed = discord.Embed(title="⏰ Time Message Alerts Hub", color=0x3498db, description="Schedule timed standard text warnings or clear past records below.")
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=TimeMessageConfigView(interaction.guild_id))
-
 # =================================================================
 # 🚀 6. SLASH COMMANDS
 # =================================================================
@@ -1469,6 +1863,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 @bot.event
 async def on_member_join(member: discord.Member):
     if member.bot: return
+    if not is_feature_enabled(member.guild.id, "welcome"): return
     try:
         guild = member.guild
         inviter_found = None
@@ -1541,6 +1936,7 @@ async def on_member_join(member: discord.Member):
 @bot.event
 async def on_member_remove(member: discord.Member):
     if member.bot: return
+    if not is_feature_enabled(member.guild.id, "welcome"): return
     try:
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
         cursor.execute("SELECT channel_id, g_title, g_desc FROM welcome WHERE guild_id = ?", (str(member.guild.id),))
@@ -1807,45 +2203,49 @@ async def on_message(message: discord.Message):
                 globals()['active_ai_tasks'].pop(message.id, None)
             
 
-    # =================================================================
+# =================================================================
     # 🔒 1. 自動禁言黑名單檢查（修復：刪除前發送通知、被禁言的人看得見時間）
     # =================================================================
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
-    cursor.execute("SELECT banned_word, duration_str FROM mutes WHERE guild_id = ?", (str(message.guild.id),))
-    banned_list = cursor.fetchall()
-    for word, dur in banned_list:
-        if word in message.content:
-            try:
-                # 🎯 修正點：在刪除原訊息前，先「私訊」給違規用戶，確保他絕對看得到自己被關多久、為什麼被關
-                try:
-                    await message.author.send(
-                        f"⚠️ **Auto mute**\n"
-                        f"U sent `\"{word}\"` in **{message.guild.name}**\n"
-                        f"And u have been **Timeout** for** {dur}** by system.\n"
-                        f"ur original message: \n> {message.content}"
-                    )
-                except discord.Forbidden:
-                    pass  # 對方若關閉陌生人私訊則略過，不讓程式崩潰
 
-                await message.delete()
-                delta, _ = parse_mute_duration(dur)
-                await message.author.timeout(delta or datetime.timedelta(minutes=10), reason="Auto Mute Triggered")
-                
-                # 🎯 修正點：公開頻道警示也改用 mention 標記，讓他事後看得到
-                embed = discord.Embed(
-                    title="HAHAHA 😂", 
-                    color=0xff0000, 
-                    description=f'{message.author.mention} has been muted for **{dur}** due to sending a blocked word, you can try and be the next!'
-                )
-                embed.set_footer(text=f"{message.guild.name}｜67")
-                await message.channel.send(embed=embed)
-                conn.close()
-                return 
-            except Exception as e:
-                logger.error(f"[Auto Mute 錯誤]: {e}")
-                pass
+    gid = str(message.guild.id)
+    uid = str(message.author.id)
+
+    if is_feature_enabled(gid, "automute"):
+        cursor.execute("SELECT banned_word, duration_str FROM mutes WHERE guild_id = ?", (gid,))
+        banned_list = cursor.fetchall()
+        for word, dur in banned_list:
+            if word in message.content:
+                try:
+                    # 🎯 修正點：在刪除原訊息前，先「私訊」給違規用戶，確保他絕對看得到自己被關多久、為什麼被關
+                    try:
+                        await message.author.send(
+                            f"⚠️ **Auto mute**\n"
+                            f"U sent `\"{word}\"` in **{message.guild.name}**\n"
+                            f"And u have been **Timeout** for** {dur}** by system.\n"
+                            f"ur original message: \n> {message.content}"
+                        )
+                    except discord.Forbidden:
+                        pass  # 對方若關閉陌生人私訊則略過，不讓程式崩潰
+
+                    await message.delete()
+                    delta, _ = parse_mute_duration(dur)
+                    await message.author.timeout(delta or datetime.timedelta(minutes=10), reason="Auto Mute Triggered")
+                    
+                    # 🎯 修正點：公開頻道警示也改用 mention 標記，讓他事後看得到
+                    embed = discord.Embed(
+                        title="HAHAHA 😂", 
+                        color=0xff0000, 
+                        description=f'{message.author.mention} has been muted for **{dur}** due to sending a blocked word, you can try and be the next!'
+                    )
+                    embed.set_footer(text=f"{message.guild.name}｜67")
+                    await message.channel.send(embed=embed)
+                    conn.close()
+                    return 
+                except Exception as e:
+                    logger.error(f"[Auto Mute 錯誤]: {e}")
+                    pass
 
     # =================================================================
     # 6️⃣7️⃣ 2. 檢查 "67" 關鍵字與次數統計（修復：排除網址）
@@ -1860,48 +2260,193 @@ async def on_message(message: discord.Message):
     # =================================================================
     # 📈 3. 經驗值更新、升等檢查、身分組與通知發放
     # =================================================================
-    uid = str(message.author.id)
-    gid = str(message.guild.id)
-    
-    cursor.execute("SELECT xp, level, count_67 FROM levels WHERE guild_id = ? AND user_id = ?", (gid, uid))
-    row = cursor.fetchone()
-    xp, lvl, count_67 = row if row else (0, 1, 0)
+    if is_feature_enabled(gid, "level"):
+        cursor.execute("SELECT xp, level, count_67 FROM levels WHERE guild_id = ? AND user_id = ?", (gid, uid))
+        row = cursor.fetchone()
+        xp, lvl, count_67 = row if row else (0, 1, 0)
 
-    if occurrences > 0:
-        count_67 += occurrences
-        xp_gained = (occurrences * 20) + random.randint(15, 25)
-    else:
-        xp_gained = random.randint(15, 25)
-        
-    new_xp = xp + xp_gained
-    new_lvl = lvl
-    
-    is_admin = message.author.guild_permissions.administrator if isinstance(message.author, discord.Member) else False
-    
-    while new_xp >= get_xp_needed(new_lvl, is_admin):
-        new_xp -= get_xp_needed(new_lvl, is_admin)
-        new_lvl += 1
-
-    cursor.execute("INSERT OR REPLACE INTO levels (guild_id, user_id, xp, level, count_67) VALUES (?, ?, ?, ?, ?)", (gid, uid, new_xp, new_lvl, count_67))
-    conn.commit()
-
-    if new_lvl > lvl:
-        for l in range(lvl + 1, new_lvl + 1):
-            await check_level_roles(message.author, l)
+        if occurrences > 0:
+            count_67 += occurrences
+            xp_gained = (occurrences * 20) + random.randint(15, 25)
+        else:
+            xp_gained = random.randint(15, 25)
             
-        cursor.execute("SELECT channel_id, message FROM levelup WHERE guild_id = ?", (gid,))
-        lvl_row = cursor.fetchone()
-        if lvl_row and lvl_row[0]:
-            try:
-                channel = message.guild.get_channel(int(lvl_row[0])) or await message.fetch_channel(int(lvl_row[0]))
-                if channel:
-                    announce_msg = parse_placeholders(lvl_row[1], message.author, message.guild, extra={"level": new_lvl})
-                    await channel.send(announce_msg)
-            except Exception as e:
-                logger.error(f"[發送升等訊息失敗]: {e}")
+        new_xp = xp + xp_gained
+        new_lvl = lvl
+        
+        is_admin = message.author.guild_permissions.administrator if isinstance(message.author, discord.Member) else False
+        
+        while new_xp >= get_xp_needed(new_lvl, is_admin):
+            new_xp -= get_xp_needed(new_lvl, is_admin)
+            new_lvl += 1
+
+        cursor.execute("INSERT OR REPLACE INTO levels (guild_id, user_id, xp, level, count_67) VALUES (?, ?, ?, ?, ?)", (gid, uid, new_xp, new_lvl, count_67))
+        conn.commit()
+
+        if new_lvl > lvl:
+            for l in range(lvl + 1, new_lvl + 1):
+                await check_level_roles(message.author, l)
+                
+            cursor.execute("SELECT channel_id, message, reply_mode FROM levelup WHERE guild_id = ?", (gid,))
+            lvl_row = cursor.fetchone()
+            if lvl_row:
+                cid, msg_template, reply_mode = lvl_row
+                try:
+                    announce_msg = parse_placeholders(msg_template, message.author, message.guild, extra={"level": new_lvl})
+                    if reply_mode:
+                        await message.reply(announce_msg)
+                    elif cid:
+                        channel = message.guild.get_channel(int(cid)) or await message.fetch_channel(int(cid))
+                        if channel:
+                            await channel.send(announce_msg)
+                except Exception as e:
+                    logger.error(f"[發送升等訊息失敗]: {e}")
+
+    # =================================================================
+    # 🔥 4. Streaks 系統：連續發言天數統計（每個伺服器獨立）
+    # =================================================================
+    if is_feature_enabled(gid, "streaks"):
+        cursor.execute("SELECT messages_needed, notify_channel_id FROM streaks_settings WHERE guild_id = ?", (gid,))
+        s_row = cursor.fetchone()
+        s_msgneeded, s_channel_id = s_row if s_row else (20, None)
+
+        s_tz = datetime.timezone(datetime.timedelta(hours=0))
+        s_now = datetime.datetime.now(s_tz)
+        today_str = s_now.strftime("%Y-%m-%d")
+        yesterday_str = (s_now - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+
+        cursor.execute("SELECT current_streak, longest_streak, messages_today, last_message_date, last_streak_date FROM streaks_data WHERE guild_id = ? AND user_id = ?", (gid, uid))
+        d_row = cursor.fetchone()
+        cur_streak, longest_streak, msgs_today, last_msg_date, last_streak_date = d_row if d_row else (0, 0, 0, '', '')
+
+        if last_msg_date != today_str:
+            if last_streak_date != yesterday_str and last_streak_date != today_str and cur_streak > 0:
+                # 🎯 連擊斷了：收回身分組、還原暱稱
+                await revoke_streak_roles(message.author, cur_streak)
+                await revert_streak_nickname(message.author)
+                cur_streak = 0
+            msgs_today = 0
+            last_msg_date = today_str
+
+        msgs_today += 1
+
+        if msgs_today == s_msgneeded and last_streak_date != today_str:
+            cur_streak += 1
+            last_streak_date = today_str
+            longest_streak = max(longest_streak, cur_streak)
+
+            await check_streak_roles(message.author, cur_streak)
+            await apply_streak_nickname(message.author, cur_streak)
+
+            week_start = get_week_start(s_now)
+            weekday_idx = s_now.weekday()
+            cursor.execute("SELECT day_status FROM streaks_weekly WHERE guild_id = ? AND user_id = ? AND week_start = ?", (gid, uid, week_start))
+            wrow = cursor.fetchone()
+            status = list(wrow[0]) if wrow else list("0000000")
+            status[weekday_idx] = "1"
+            cursor.execute("INSERT OR REPLACE INTO streaks_weekly (guild_id, user_id, week_start, day_status) VALUES (?, ?, ?, ?)", (gid, uid, week_start, "".join(status)))
+
+            if s_channel_id:
+                try:
+                    notify_channel = message.guild.get_channel(int(s_channel_id)) or await message.guild.fetch_channel(int(s_channel_id))
+                    if notify_channel:
+                        s_embed = discord.Embed(
+                            title="🔥 Streak!",
+                            color=0xff6600,
+                            description=f"{message.author.mention} reached a **{cur_streak}**-day streak!"
+                        )
+                        s_embed.set_footer(text=f"{message.guild.name}｜67")
+                        await notify_channel.send(embed=s_embed)
+                except Exception as e:
+                    logger.error(f"[Streak 通知發送失敗]: {e}")
+
+        cursor.execute(
+            "INSERT OR REPLACE INTO streaks_data (guild_id, user_id, current_streak, longest_streak, messages_today, last_message_date, last_streak_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (gid, uid, cur_streak, longest_streak, msgs_today, last_msg_date, last_streak_date)
+        )
+        conn.commit()
 
     conn.close()
 
+class StreaksBoardView(ui.View):
+    def __init__(self, target: discord.User, guild: discord.Guild):
+        super().__init__(timeout=60)
+        self.target = target
+        self.guild = guild
+        self.mode = "personal"
+
+    def build_personal_embed(self) -> discord.Embed:
+        gid = str(self.guild.id)
+        uid = str(self.target.id)
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute("SELECT current_streak, longest_streak, messages_today, last_message_date FROM streaks_data WHERE guild_id = ? AND user_id = ?", (gid, uid))
+        row = cursor.fetchone()
+
+        cursor.execute("SELECT messages_needed FROM streaks_settings WHERE guild_id = ?", (gid,))
+        srow = cursor.fetchone()
+        msgneeded = srow[0] if srow else 20
+
+        s_tz = datetime.timezone(datetime.timedelta(hours=0))
+        s_now = datetime.datetime.now(s_tz)
+        today_str = s_now.strftime("%Y-%m-%d")
+        week_start = get_week_start(s_now)
+
+        cursor.execute("SELECT day_status FROM streaks_weekly WHERE guild_id = ? AND user_id = ? AND week_start = ?", (gid, uid, week_start))
+        wrow = cursor.fetchone()
+        day_status = wrow[0] if wrow else "0000000"
+        conn.close()
+
+        if row:
+            cur_streak, longest, msgs_today, last_msg_date = row
+            today_count = msgs_today if last_msg_date == today_str else 0
+        else:
+            cur_streak, longest, today_count = 0, 0, 0
+
+        progress_status = "✅ Achieved!" if today_count >= msgneeded else "Not up to standard"
+
+        embed = discord.Embed(
+            title=f"🔥 {self.target.name}'s Streaks",
+            color=0xff6600,
+            description=(
+                f"Today's progress: **{today_count}/{msgneeded}** → **{progress_status}**\n"
+                f"Now streaks: **{cur_streak}** days\n"
+                f"Top streaks: **{longest}** days\n\n"
+                f"This week:\n{build_week_line(day_status)}"
+            )
+        )
+        embed.set_footer(text=f"{self.guild.name}｜67")
+        return embed
+
+    def build_leaderboard_embed(self) -> discord.Embed:
+        gid = str(self.guild.id)
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute("SELECT user_id, current_streak, longest_streak FROM streaks_data WHERE guild_id = ? ORDER BY current_streak DESC LIMIT 10", (gid,))
+        rows = cursor.fetchall(); conn.close()
+
+        desc = ""
+        for idx, (uid, cur, longest) in enumerate(rows, 1):
+            user = bot.get_user(int(uid))
+            name = user.name if user else f"User {uid}"
+            desc += f"{idx}. **{name}**: 🔥{cur} (Best: {longest})\n"
+
+        embed = discord.Embed(title=f"🏆 {self.guild.name} Streaks Leaderboard", description=desc or "No data available.", color=0xff6600)
+        embed.set_footer(text=f"{self.guild.name}｜67")
+        return embed
+
+    @ui.button(label="Leaderboard / Personal 🔄", style=discord.ButtonStyle.primary)
+    async def toggle(self, interaction: discord.Interaction, button: ui.Button):
+        self.mode = "leaderboard" if self.mode == "personal" else "personal"
+        embed = self.build_leaderboard_embed() if self.mode == "leaderboard" else self.build_personal_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
+@bot.tree.command(name="streaks", description="Check your current message streak or view the leaderboard")
+async def streaks(interaction: discord.Interaction, user: Optional[discord.Member] = None):
+    target = user or interaction.user
+    view = StreaksBoardView(target, interaction.guild)
+    embed = view.build_personal_embed()
+    await interaction.response.send_message(embed=embed, view=view)
+    
 # =================================================================
 # 🔑 8. RUN BOT
 # =================================================================
