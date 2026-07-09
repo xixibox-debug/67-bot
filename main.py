@@ -1080,18 +1080,26 @@ class OrderActionView(ui.View):
           "❌ 此訂單已經完成過了。 This order has completed.", ephemeral=True
       )
 
+    # 限制 3：若內文已有接手人，顯示錯誤並防止重複點擊
+    if "👉 **接手人 Taken over by：**" in interaction.message.content:
+      return await interaction.response.send_message(
+          "❌ 此訂單已被接手，無法重複接手。 This order has been taken over.", ephemeral=True
+      )
+
     user_mention = interaction.user.mention
     current_content = interaction.message.content
 
-    # 更新內容紀錄接手者
-    if "👉 **接手人**" not in current_content:
-      new_content = current_content + f"\n\n👉 **接手人**: {user_mention}"
-    else:
-      new_content = current_content + f", {user_mention}"
+    # 1. 紀錄接手者
+    new_content = current_content + f"\n\n👉 **接手人 Taken over by：**: {user_mention}"
 
+    # 🎯 2. 按下接手後，將「接手」按鈕本身關閉 (Disabled) 並變更為灰色
+    button.disabled = True
+    button.style = discord.ButtonStyle.secondary
+
+    # 3. 編輯訊息更新內文與按鈕狀態
     await interaction.response.edit_message(content=new_content, view=self)
     await interaction.followup.send(
-        f"✅ {user_mention} 已接手此訂單！  {user_mention} has taken over this order.", ephemeral=False
+        f"✅ {user_mention} 已接手此訂單！ {user_mention} has taken over this order!", ephemeral=False
     )
 
   @ui.button(
