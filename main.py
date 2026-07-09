@@ -1090,7 +1090,7 @@ class OrderActionView(ui.View):
     current_content = interaction.message.content
 
     # 1. 紀錄接手者
-    new_content = current_content + f"\n\n👉 **接手人 Taken over by：**: {user_mention}"
+    new_content = current_content + f"\n\n👉 **接手人 Taken over by：** {user_mention}"
 
     # 🎯 2. 按下接手後，將「接手」按鈕本身關閉 (Disabled) 並變更為灰色
     button.disabled = True
