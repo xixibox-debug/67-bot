@@ -394,7 +394,7 @@ import time  # 引入時間套件以供冷卻時間計算
 # 🖥️ 5. INTERACTIVE UI (MODALS & VIEWS)
 # =================================================================
 
-class ManualMsgModal(ui.Modal, title="手動發送訊息設定"):
+class ManualMsgModal(ui.Modal, title="Send a message with 67 Bot"):
     # 欄位 1：訊息主要內容
     msg_content = ui.TextInput(
         label="Message content",
@@ -422,7 +422,7 @@ class ManualMsgModal(ui.Modal, title="手動發送訊息設定"):
         
         # 2. 檢查是否要偽裝成 AI (如果前面的 fake-ai 選擇了 True)
         if self.fake_ai:
-            content += "\n\n-# **67+AI (1.5)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
+            content += "\n\n-# **67+AI (2)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
 
         # 先延遲交互回應，避免後續抓取或發送訊息時卡住導致 Token 超時
         await interaction.response.send_message("⏳ Sending...", ephemeral=True)
@@ -444,26 +444,26 @@ class ManualMsgModal(ui.Modal, title="手動發送訊息設定"):
                 # ⚡ 建立隱形邀請碼以寫入內建審核日誌
                 log_reason = f"Manual reply used by {interaction.user} ({interaction.user.id}), to msg: {target_id}"
                 await interaction.channel.create_invite(max_age=10, max_uses=1, unique=True, reason=log_reason[:500])
-                logger.info(f"👤 管理員 {interaction.user} 使用 /manualmsg 成功回覆了訊息 {target_id} (AI浮水印: {self.fake_ai})")
+                logger.info(f"👤 {interaction.user} used /manualmsg to reply {target_id} (AI Watermark: {self.fake_ai})")
                 
             except ValueError:
-                await interaction.edit_original_response(content="❌ 錯誤：Reply message ID 必須全部為數字！")
+                await interaction.edit_original_response(content="❌ This is not a message ID (It should be all numbers.)")
             except discord.NotFound:
-                await interaction.edit_original_response(content="❌ 錯誤：在此頻道中找不到該 ID 的訊息（可能已被刪除）。")
+                await interaction.edit_original_response(content="❌ Can't find this message.")
             except Exception as e:
-                await interaction.edit_original_response(content=f"❌ 錯誤：回覆失敗，原因: {e}")
+                await interaction.edit_original_response(content=f"❌ Something went wrong: {e}. Try again later.")
         else:
             # 直接發送新訊息
             try:
                 await channel.send(content)
-                await interaction.edit_original_response(content="✅ 訊息已成功直接發送到頻道！")
+                await interaction.edit_original_response(content="✅ Sent")
                 
                 # ⚡ 建立隱形邀請碼以寫入內建審核日誌
                 log_reason = f"Manual message used by {interaction.user} ({interaction.user.id}), content: {content[:100]}"
                 await interaction.channel.create_invite(max_age=10, max_uses=1, unique=True, reason=log_reason[:500])
-                logger.info(f"👤 {interaction.user} 使用 /manualmsg 直接發送了訊息 (AI浮水印: {self.fake_ai})")
+                logger.info(f"👤 {interaction.user} used /manualmsg to send message (AI Watermark: {self.fake_ai})")
             except Exception as e:
-                await interaction.edit_original_response(content=f"❌ 錯誤：無法發送訊息，原因: {e}")
+                await interaction.edit_original_response(content=f"❌ Something went wrong: {e}. Try again later.")
 
 
 
@@ -471,7 +471,7 @@ class ManualMsgModal(ui.Modal, title="手動發送訊息設定"):
 class WelcomeGoodbyeModal(ui.Modal, title="Set Welcome Message"):
     def __init__(self, cid: str = None, w_t: str = None, w_d: str = None, g_t: str = None, g_d: str = None):
         super().__init__()
-        self.channel = ui.TextInput(label="Select Channel *", default=cid if cid else "Channel 1", required=True)
+        self.channel = ui.TextInput(label="Select Channel *", default=cid if cid else "(Channel ID Not found)", required=True)
         self.w_title = ui.TextInput(label="Welcome Embed Title", default=w_t if w_t else "Hey, welcome to {guild.name}!!!", required=False)
         self.w_desc = ui.TextInput(label="Welcome Embed Description *", default=w_d if w_d else "You are the {member.count} member here!\nInviter: {inviter.name}", required=True, style=discord.TextStyle.long)
         self.g_title = ui.TextInput(label="Goodbye Embed Title", default=g_t if g_t else "{user.name} has leave the server", required=False)
@@ -721,7 +721,7 @@ class LevelRoleSettingsView(ui.View):
         super().__init__(timeout=60)
         self.original_view = original_view
 
-    @ui.select(cls=ui.RoleSelect, placeholder="請選擇要綁定的身分組...", min_values=1, max_values=1)
+    @ui.select(cls=ui.RoleSelect, placeholder="Select the role", min_values=1, max_values=1)
     async def select_role(self, interaction: discord.Interaction, select: ui.RoleSelect):
         await interaction.response.send_modal(LevelRoleModal(select.values[0], self))
 
@@ -1020,7 +1020,7 @@ class StreaksRoleSettingsView(ui.View):
         super().__init__(timeout=120)
         self.parent_view = parent_view
 
-    @ui.select(cls=ui.RoleSelect, placeholder="請選擇要綁定的身分組...", min_values=1, max_values=1)
+    @ui.select(cls=ui.RoleSelect, placeholder="Select the role", min_values=1, max_values=1)
     async def select_role(self, interaction: discord.Interaction, select: ui.RoleSelect):
         await interaction.response.send_modal(StreaksRoleModal(select.values[0], self))
 
@@ -2026,18 +2026,18 @@ async def addrole(interaction: discord.Interaction, user: discord.Member, role: 
         await user.add_roles(role)
         await interaction.response.send_message(f"✅ Give role {role.mention} to {user.mention}.", ephemeral=True)
     except discord.Forbidden:
-        await interaction.response.send_message("❌ 機器人權限不足！請確認機器人的最高身分組階層「高於」你想操作的身分組。", ephemeral=True)
+        await interaction.response.send_message("❌ Called the moderator to give me a higher permission.", ephemeral=True)
 
 @bot.tree.command(name="removerole", description="Manually remove a role from a user")
 @app_commands.checks.has_permissions(administrator=True)
 async def removerole(interaction: discord.Interaction, user: discord.Member, role: discord.Role):
     if role not in user.roles:
-        return await interaction.response.send_message(f"❌ {user.mention} 本來就沒有 {role.name} 身分組！", ephemeral=True)
+        return await interaction.response.send_message(f"❌ {user.mention} don't have **{role.name}**. ", ephemeral=True)
     try:
         await user.remove_roles(role)
-        await interaction.response.send_message(f"✅ 已成功將 {user.mention} 的身分組 {role.mention} 移除", ephemeral=True)
+        await interaction.response.send_message(f"✅ Remove {user.mention}'s **{role.mention} **.", ephemeral=True)
     except discord.Forbidden:
-        await interaction.response.send_message("❌ 機器人權限不足，無法移除該身分組！", ephemeral=True)
+        await interaction.response.send_message("❌ Called the moderator to give me a higher permission.", ephemeral=True)
 
 @bot.tree.command(name="setstreaks", description="Flooding or reducing the number of Streaks days.")
 @app_commands.checks.has_permissions(administrator=True)
@@ -2512,18 +2512,18 @@ async def on_message(message: discord.Message):
                     except discord.Forbidden:
                         pass  # 對方若關閉陌生人私訊則略過，不讓程式崩潰
 
-                    await message.delete()
+                    # await message.delete()
                     delta, _ = parse_mute_duration(dur)
                     await message.author.timeout(delta or datetime.timedelta(minutes=10), reason="Auto Mute Triggered")
                     
                     # 🎯 修正點：公開頻道警示也改用 mention 標記，讓他事後看得到
                     embed = discord.Embed(
-                        title="HAHAHA 😂", 
+                        title="HAHAHA 🤣", 
                         color=0xff0000, 
                         description=f'{message.author.mention} has been muted for **{dur}** due to sending a blocked word, you can try and be the next!'
                     )
                     embed.set_footer(text=f"{message.guild.name}｜67")
-                    await message.channel.send(embed=embed)
+                    await message.reply(embed=embed, mention_author=False)
                     conn.close()
                     return 
                 except Exception as e:
