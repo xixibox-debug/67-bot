@@ -2507,7 +2507,7 @@ async def on_message(message: discord.Message):
                             f"⚠️ **Auto mute**\n"
                             f"U sent `\"{word}\"` in **{message.guild.name}**\n"
                             f"And u have been **Timeout** for** {dur}** by system.\n"
-                            f"ur original message: \n> {message.content}"
+                            f"ur original message: \n ```{message.content}```"
                         )
                     except discord.Forbidden:
                         pass  # 對方若關閉陌生人私訊則略過，不讓程式崩潰
