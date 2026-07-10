@@ -232,7 +232,7 @@ def is_feature_enabled(guild_id, feature: str) -> bool:
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
     cursor.execute("SELECT enabled FROM feature_toggles WHERE guild_id = ? AND feature = ?", (str(guild_id), feature))
     row = cursor.fetchone(); conn.close()
-    return (row[0] == 1) if row else True  # 預設開啟
+    return (row[0] == 1) if row else False  # 🎯 預設關閉
 
 
 def set_feature_enabled(guild_id, feature: str, enabled: bool):
@@ -499,16 +499,57 @@ class WelcomeConfigView(ui.View):
     def __init__(self, guild_id: int = None):
         super().__init__(timeout=300)
         self.guild_id = guild_id
-        if guild_id:
+        enabled = is_feature_enabled(guild_id, "welcome") if guild_id else False
+        self.toggle_enabled.label = "✅ Status: On" if enabled else "❌ Status: Off"
+        self.toggle_enabled.style = discord.ButtonStyle.success if enabled else discord.ButtonStyle.danger
+
+        if not enabled:
+            # 🎯 關閉時只留 Back + Toggle 兩顆
+            self.remove_item(self.set_channel)
+            self.remove_item(self.edit_msg)
+            self.remove_item(self.reset_panel)
+        elif guild_id:
             conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
             cursor.execute("SELECT channel_id FROM welcome WHERE guild_id = ?", (str(guild_id),))
             row = cursor.fetchone()
             conn.close()
             if row and row[0]:
                 self.set_channel.default_values = [discord.Object(id=int(row[0]))]
-            enabled = is_feature_enabled(guild_id, "welcome")
-            self.toggle_enabled.label = "✅ Enabled" if enabled else "❌ Disabled"
-            self.toggle_enabled.style = discord.ButtonStyle.success if enabled else discord.ButtonStyle.danger
+
+    def build_embed(self, guild: discord.Guild) -> discord.Embed:
+        enabled = is_feature_enabled(self.guild_id, "welcome")
+        embed = discord.Embed(title="👋 Welcome/Goodbye Panel Settings", color=0x54a7dd if enabled else 0x2b2d31)
+        if not enabled:
+            embed.description = "Status: **off**"
+        else:
+            conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+            cursor.execute("SELECT channel_id, w_title, w_desc, g_title, g_desc FROM welcome WHERE guild_id = ?", (str(self.guild_id),))
+            row = cursor.fetchone(); conn.close()
+            cid, w_t, w_d, g_t, g_d = row if row else (None, None, None, None, None)
+            ch_text = f"<#{cid}>" if cid else "Not set"
+            embed.description = (
+                f"Status: **on**\n"
+                f"Notification channel: {ch_text}\n\n"
+                f"**Welcome Embed title:** {w_t or 'Not set'}\n"
+                f"**Welcome Embed content:**\n{w_d or 'Not set'}\n\n"
+                f"**Goodbye Embed title:** {g_t or 'Not set'}\n"
+                f"**Goodbye Embed content:**\n{g_d or 'Not set'}"
+            )
+        embed.set_footer(text=f"{guild.name}｜67")
+        return embed
+
+    @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=0)
+    async def back(self, interaction: discord.Interaction, button: ui.Button):
+        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nAuto Mute\nTime Message")
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
+        await interaction.response.edit_message(embed=embed, view=SettingsView())
+
+    @ui.button(label="❌ Status: Off", style=discord.ButtonStyle.danger, row=0)
+    async def toggle_enabled(self, interaction: discord.Interaction, button: ui.Button):
+        cur = is_feature_enabled(interaction.guild_id, "welcome")
+        set_feature_enabled(interaction.guild_id, "welcome", not cur)
+        new_view = WelcomeConfigView(interaction.guild_id)
+        await interaction.response.edit_message(embed=new_view.build_embed(interaction.guild), view=new_view)
 
     @ui.select(cls=ui.ChannelSelect, channel_types=[discord.ChannelType.text], placeholder="🎯 Select Welcome Alert Channel")
     async def set_channel(self, interaction: discord.Interaction, select: ui.ChannelSelect):
@@ -519,7 +560,8 @@ class WelcomeConfigView(ui.View):
         if row: cursor.execute("UPDATE welcome SET channel_id = ? WHERE guild_id = ?", (str(cid), str(interaction.guild_id)))
         else: cursor.execute("INSERT INTO welcome VALUES (?, ?, '', '', '', '')", (str(interaction.guild_id), str(cid)))
         conn.commit(); conn.close()
-        await interaction.response.send_message(f"🎯 Target log channel set to {select.values[0].mention}", ephemeral=True)
+        new_view = WelcomeConfigView(interaction.guild_id)
+        await interaction.response.edit_message(embed=new_view.build_embed(interaction.guild), view=new_view)
 
     @ui.button(label="📝 Edit Cards (Modal)", style=discord.ButtonStyle.primary)
     async def edit_msg(self, interaction: discord.Interaction, button: ui.Button):
@@ -529,26 +571,13 @@ class WelcomeConfigView(ui.View):
         if row: await interaction.response.send_modal(WelcomeGoodbyeModal(row[0], row[1], row[2], row[3], row[4]))
         else: await interaction.response.send_modal(WelcomeGoodbyeModal())
 
-    @ui.button(label="❌ Disable / Reset Panel", style=discord.ButtonStyle.danger)
+    @ui.button(label="🔄 Reset", style=discord.ButtonStyle.danger)
     async def reset_panel(self, interaction: discord.Interaction, button: ui.Button):
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
         cursor.execute("DELETE FROM welcome WHERE guild_id = ?", (str(interaction.guild_id),))
         conn.commit(); conn.close()
-        await interaction.response.send_message("🗑️ Welcome/Goodbye feature disabled.", ephemeral=True)
-
-    @ui.button(label="✅ Enabled", style=discord.ButtonStyle.success)
-    async def toggle_enabled(self, interaction: discord.Interaction, button: ui.Button):
-        cur = is_feature_enabled(interaction.guild_id, "welcome")
-        set_feature_enabled(interaction.guild_id, "welcome", not cur)
-        button.label = "✅ Enabled" if not cur else "❌ Disabled"
-        button.style = discord.ButtonStyle.success if not cur else discord.ButtonStyle.danger
-        await interaction.response.edit_message(view=self)
-
-    @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary)
-    async def back(self, interaction: discord.Interaction, button: ui.Button):
-        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nAuto Mute\nTime Message")
-        embed.set_footer(text=f"{interaction.guild.name}｜67")
-        await interaction.response.edit_message(embed=embed, view=SettingsView())
+        new_view = WelcomeConfigView(interaction.guild_id)
+        await interaction.response.edit_message(embed=new_view.build_embed(interaction.guild), view=new_view)
 
 
 class LevelMessageModal(ui.Modal, title="Set Level Up Message"):
@@ -569,47 +598,77 @@ class LevelSettingsView(ui.View):
     def __init__(self, guild_id: int = None):
         super().__init__(timeout=180)
         self.guild_id = guild_id
-        if guild_id:
+        enabled = is_feature_enabled(guild_id, "level") if guild_id else False
+        self.toggle_enabled.label = "✅ Status: On" if enabled else "❌ Status: Off"
+        self.toggle_enabled.style = discord.ButtonStyle.success if enabled else discord.ButtonStyle.danger
+
+        if not enabled:
+            self.remove_item(self.select_level_channel)
+            self.remove_item(self.go_level_role)
+            self.remove_item(self.mod_text)
+            self.remove_item(self.toggle_dest)
+        elif guild_id:
             conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
             cursor.execute("SELECT channel_id, reply_mode FROM levelup WHERE guild_id = ?", (str(guild_id),))
             row = cursor.fetchone()
             conn.close()
-            if row and row[0]:
-                self.select_level_channel.default_values = [discord.Object(id=int(row[0]))]
-            reply_mode = row[1] if row else 0
-            self.toggle_reply.label = "💬 Reply Under Message: On" if reply_mode else "💬 Reply Under Message: Off"
-            self.toggle_reply.style = discord.ButtonStyle.success if reply_mode else discord.ButtonStyle.secondary
-            enabled = is_feature_enabled(guild_id, "level")
-            self.toggle_enabled.label = "✅ Enabled" if enabled else "❌ Disabled"
-            self.toggle_enabled.style = discord.ButtonStyle.success if enabled else discord.ButtonStyle.danger
+            cid, reply_mode = row if row else (None, 0)
+            if cid and not reply_mode:
+                self.select_level_channel.default_values = [discord.Object(id=int(cid))]
+            self.toggle_dest.label = "🔀 Switch to Channel Mode" if reply_mode else "🔀 Switch to Reply Mode"
 
-    @ui.select(cls=ui.ChannelSelect, channel_types=[discord.ChannelType.text], placeholder="Select Level Up Channel 📢")
+    def build_embed(self, guild: discord.Guild) -> discord.Embed:
+        enabled = is_feature_enabled(self.guild_id, "level")
+        embed = discord.Embed(title="📈 Level System Settings", color=0x2ecc71 if enabled else 0x2b2d31)
+        if not enabled:
+            embed.description = "Status: **off**"
+        else:
+            conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+            cursor.execute("SELECT channel_id, message, reply_mode FROM levelup WHERE guild_id = ?", (str(self.guild_id),))
+            row = cursor.fetchone()
+            cursor.execute("SELECT level, role_id FROM level_roles WHERE guild_id = ? ORDER BY level ASC", (str(self.guild_id),))
+            role_rows = cursor.fetchall(); conn.close()
+
+            cid, msg, reply_mode = row if row else (None, "Level up to {level}!", 0)
+            dest_text = "Reply under the message that triggered it" if reply_mode else (f"<#{cid}>" if cid else "Not set")
+            roles_text = "\n".join(f"{lvl} → <@&{rid}>" for lvl, rid in role_rows) if role_rows else "Not set"
+
+            embed.description = (
+                f"Status: **on**\n"
+                f"Notification channel: {dest_text}\n\n"
+                f"**Role award:**\n{roles_text}\n\n"
+                f"**Level up message:**\n{msg}"
+            )
+        embed.set_footer(text=f"{guild.name}｜67")
+        return embed
+
+    @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=0)
+    async def back(self, interaction: discord.Interaction, button: ui.Button):
+        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nAuto Mute\nTime Message")
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
+        await interaction.response.edit_message(embed=embed, view=SettingsView())
+
+    @ui.button(label="❌ Status: Off", style=discord.ButtonStyle.danger, row=0)
+    async def toggle_enabled(self, interaction: discord.Interaction, button: ui.Button):
+        cur = is_feature_enabled(interaction.guild_id, "level")
+        set_feature_enabled(interaction.guild_id, "level", not cur)
+        new_view = LevelSettingsView(interaction.guild_id)
+        await interaction.response.edit_message(embed=new_view.build_embed(interaction.guild), view=new_view)
+
+    @ui.select(cls=ui.ChannelSelect, channel_types=[discord.ChannelType.text], placeholder="Select Level Up Channel 📢", row=1)
     async def select_level_channel(self, interaction: discord.Interaction, select: ui.ChannelSelect):
         cid = select.values[0].id
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-        cursor.execute("SELECT message, reply_mode FROM levelup WHERE guild_id = ?", (str(interaction.guild_id),))
-        row = cursor.fetchone()
-        msg = row[0] if row else "Level up to {level}!"
-        reply_mode = row[1] if row else 0
-        cursor.execute("INSERT OR REPLACE INTO levelup (guild_id, channel_id, message, reply_mode) VALUES (?, ?, ?, ?)", (str(interaction.guild_id), str(cid), msg, reply_mode))
+        cursor.execute("SELECT message FROM levelup WHERE guild_id = ?", (str(interaction.guild_id),))
+        row = cursor.fetchone(); msg = row[0] if row else "Level up to {level}!"
+        # 🎯 選了頻道 = 自動切回「頻道模式」，跟回覆模式互斥
+        cursor.execute("INSERT OR REPLACE INTO levelup (guild_id, channel_id, message, reply_mode) VALUES (?, ?, ?, 0)", (str(interaction.guild_id), str(cid), msg))
         conn.commit(); conn.close()
-        await interaction.response.send_message(f"✅ Level channel set to {select.values[0].mention}", ephemeral=True)
-        
-    @ui.button(label="🎭 Give role to selected level", style=discord.ButtonStyle.blurple, row=2)
-    async def go_level_role(self, interaction: discord.Interaction, button: ui.Button):
-        embed = discord.Embed(
-            title="🎭 Role awards settings", 
-            description="Choose a **role** below and than set the **level**。", 
-            color=0x2b2d31
-        )
-        await interaction.response.edit_message(embed=embed, view=LevelRoleSettingsView(self))
+        new_view = LevelSettingsView(interaction.guild_id)
+        await interaction.response.edit_message(embed=new_view.build_embed(interaction.guild), view=new_view)
 
-    @ui.button(label="Modify Level Message", style=discord.ButtonStyle.success, row=1)
-    async def mod_text(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.send_modal(LevelMessageModal())
-
-    @ui.button(label="💬 Reply Under Message: Off", style=discord.ButtonStyle.secondary, row=1)
-    async def toggle_reply(self, interaction: discord.Interaction, button: ui.Button):
+    @ui.button(label="🔀 Switch to Reply Mode", style=discord.ButtonStyle.secondary, row=2)
+    async def toggle_dest(self, interaction: discord.Interaction, button: ui.Button):
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
         cursor.execute("SELECT channel_id, message, reply_mode FROM levelup WHERE guild_id = ?", (str(interaction.guild_id),))
         row = cursor.fetchone()
@@ -619,23 +678,22 @@ class LevelSettingsView(ui.View):
         new_mode = 0 if cur_mode else 1
         cursor.execute("INSERT OR REPLACE INTO levelup (guild_id, channel_id, message, reply_mode) VALUES (?, ?, ?, ?)", (str(interaction.guild_id), cid, msg, new_mode))
         conn.commit(); conn.close()
-        button.label = "💬 Reply Under Message: On" if new_mode else "💬 Reply Under Message: Off"
-        button.style = discord.ButtonStyle.success if new_mode else discord.ButtonStyle.secondary
-        await interaction.response.edit_message(view=self)
+        new_view = LevelSettingsView(interaction.guild_id)
+        await interaction.response.edit_message(embed=new_view.build_embed(interaction.guild), view=new_view)
 
-    @ui.button(label="✅ Enabled", style=discord.ButtonStyle.success, row=1)
-    async def toggle_enabled(self, interaction: discord.Interaction, button: ui.Button):
-        cur = is_feature_enabled(interaction.guild_id, "level")
-        set_feature_enabled(interaction.guild_id, "level", not cur)
-        button.label = "✅ Enabled" if not cur else "❌ Disabled"
-        button.style = discord.ButtonStyle.success if not cur else discord.ButtonStyle.danger
-        await interaction.response.edit_message(view=self)
+    @ui.button(label="🎭 Give role to selected level", style=discord.ButtonStyle.blurple, row=2)
+    async def go_level_role(self, interaction: discord.Interaction, button: ui.Button):
+        embed = discord.Embed(
+            title="🎭 Role awards settings", 
+            description="Choose a **role** below and than set the **level**。", 
+            color=0x2b2d31
+        )
+        await interaction.response.edit_message(embed=embed, view=LevelRoleSettingsView(self))
 
-    @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=2)
-    async def back(self, interaction: discord.Interaction, button: ui.Button):
-        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nAuto Mute\nTime Message")
-        embed.set_footer(text=f"{interaction.guild.name}｜67")
-        await interaction.response.edit_message(embed=embed, view=SettingsView())
+    @ui.button(label="Modify Level Message", style=discord.ButtonStyle.success, row=2)
+    async def mod_text(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_modal(LevelMessageModal())
+
 
 class LevelRoleModal(ui.Modal, title="Set give role to select level"):
     level_input = ui.TextInput(label="Tell me the level?", placeholder="ex: 10", min_length=1, max_length=3)
@@ -659,7 +717,7 @@ class LevelRoleModal(ui.Modal, title="Set give role to select level"):
         await interaction.response.send_message(f"✅ Saved. When user reach **Lv. {lvl}** will received role {self.role.mention}", ephemeral=True)
 
 class LevelRoleSettingsView(ui.View):
-    def __init__(self, original_view):
+    def __init__(self, original_view: 'LevelSettingsView'):
         super().__init__(timeout=60)
         self.original_view = original_view
 
@@ -669,7 +727,7 @@ class LevelRoleSettingsView(ui.View):
 
     @ui.button(label="⬅️ Back", style=discord.ButtonStyle.gray)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
-        embed = discord.Embed(title="⚙️ Level System Configuration", description="Chose What do u want to set", color=0x2b2d31)
+        embed = self.original_view.build_embed(interaction.guild)
         await interaction.response.edit_message(embed=embed, view=self.original_view)
 
 
@@ -687,7 +745,7 @@ class AutoMuteModal(ui.Modal, title="Add Banned Word"):
         cursor.execute("INSERT OR REPLACE INTO mutes VALUES (?, ?, ?)", (str(interaction.guild_id), self.word.value, self.time.value))
         conn.commit(); conn.close()
         self.view.update_select_menu()
-        await interaction.response.edit_message(view=self.view)
+        await interaction.response.edit_message(embed=self.view.build_embed(interaction.guild), view=self.view)
         await interaction.followup.send(f"🔒 Auto mute `{self.word.value}` added.", ephemeral=True)
 
 
@@ -700,7 +758,7 @@ class BannedWordDeleteSelect(ui.Select):
         cursor.execute("DELETE FROM mutes WHERE guild_id = ? AND banned_word = ?", (str(interaction.guild_id), word))
         conn.commit(); conn.close()
         self.view.update_select_menu()
-        await interaction.response.edit_message(view=self.view)
+        await interaction.response.edit_message(embed=self.view.build_embed(interaction.guild), view=self.view)
         await interaction.followup.send(f"✅ Removed Auto mute for: `{word}`", ephemeral=True)
 
 
@@ -708,12 +766,16 @@ class AutoMuteConfigView(ui.View):
     def __init__(self, guild_id: int):
         super().__init__(timeout=300)
         self.guild_id = guild_id
-        self.select_menu = BannedWordDeleteSelect()
-        self.add_item(self.select_menu)
-        self.update_select_menu()
         enabled = is_feature_enabled(guild_id, "automute")
-        self.toggle_enabled.label = "✅ Enabled" if enabled else "❌ Disabled"
+        self.toggle_enabled.label = "✅ Status: On" if enabled else "❌ Status: Off"
         self.toggle_enabled.style = discord.ButtonStyle.success if enabled else discord.ButtonStyle.danger
+
+        if enabled:
+            self.select_menu = BannedWordDeleteSelect()
+            self.add_item(self.select_menu)
+            self.update_select_menu()
+        else:
+            self.remove_item(self.add_word)
 
     def update_select_menu(self):
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
@@ -726,16 +788,19 @@ class AutoMuteConfigView(ui.View):
             self.select_menu.options = [discord.SelectOption(label="No banned words configured", value="none")]
             self.select_menu.disabled = True
 
-    @ui.button(label="➕ Add Banned Word", style=discord.ButtonStyle.success, row=0)
-    async def add_word(self, interaction: discord.Interaction, button: ui.Button): await interaction.response.send_modal(AutoMuteModal(self))
-
-    @ui.button(label="✅ Enabled", style=discord.ButtonStyle.success, row=0)
-    async def toggle_enabled(self, interaction: discord.Interaction, button: ui.Button):
-        cur = is_feature_enabled(self.guild_id, "automute")
-        set_feature_enabled(self.guild_id, "automute", not cur)
-        button.label = "✅ Enabled" if not cur else "❌ Disabled"
-        button.style = discord.ButtonStyle.success if not cur else discord.ButtonStyle.danger
-        await interaction.response.edit_message(view=self)
+    def build_embed(self, guild: discord.Guild) -> discord.Embed:
+        enabled = is_feature_enabled(self.guild_id, "automute")
+        embed = discord.Embed(title="🔒 Auto Mute Filter Settings", color=0xff0000 if enabled else 0x2b2d31)
+        if not enabled:
+            embed.description = "Status: **off**"
+        else:
+            conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+            cursor.execute("SELECT banned_word, duration_str FROM mutes WHERE guild_id = ?", (str(self.guild_id),))
+            words = cursor.fetchall(); conn.close()
+            words_text = "\n".join(f"{w} → {d}" for w, d in words) if words else "Not set"
+            embed.description = f"Status: **on**\n\n**Banned word:**\n{words_text}"
+        embed.set_footer(text=f"{guild.name}｜67")
+        return embed
 
     @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=0)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
@@ -743,6 +808,15 @@ class AutoMuteConfigView(ui.View):
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=SettingsView())
 
+    @ui.button(label="❌ Status: Off", style=discord.ButtonStyle.danger, row=0)
+    async def toggle_enabled(self, interaction: discord.Interaction, button: ui.Button):
+        cur = is_feature_enabled(self.guild_id, "automute")
+        set_feature_enabled(self.guild_id, "automute", not cur)
+        new_view = AutoMuteConfigView(interaction.guild_id)
+        await interaction.response.edit_message(embed=new_view.build_embed(interaction.guild), view=new_view)
+
+    @ui.button(label="➕ Add Banned Word", style=discord.ButtonStyle.success, row=0)
+    async def add_word(self, interaction: discord.Interaction, button: ui.Button): await interaction.response.send_modal(AutoMuteModal(self))
 
 class AnnouncementModal(ui.Modal, title="Add Time Message"):
     t_time = ui.TextInput(label="Time (HH:MM)", placeholder="08:00", max_length=5, required=True)
@@ -756,7 +830,7 @@ class AnnouncementModal(ui.Modal, title="Add Time Message"):
         cursor.execute("INSERT INTO announcements (time, message, channel_id) VALUES (?, ?, ?)", (self.t_time.value, self.msg.value, str(interaction.channel_id)))
         conn.commit(); conn.close()
         self.view.update_select_menu()
-        await interaction.response.edit_message(view=self.view)
+        await interaction.response.edit_message(embed=self.view.build_embed(interaction.guild), view=self.view)
         await interaction.followup.send(f"⏰ Auto message time set at {self.t_time.value}", ephemeral=True)
 
 
@@ -769,7 +843,7 @@ class TimeMessageDeleteSelect(ui.Select):
         cursor.execute("DELETE FROM announcements WHERE id = ?", (rid,))
         conn.commit(); conn.close()
         self.view.update_select_menu()
-        await interaction.response.edit_message(view=self.view)
+        await interaction.response.edit_message(embed=self.view.build_embed(interaction.guild), view=self.view)
         await interaction.followup.send("✅ This Auto message has been cancelled.", ephemeral=True)
 
 
@@ -777,12 +851,16 @@ class TimeMessageConfigView(ui.View):
     def __init__(self, guild_id: int):
         super().__init__(timeout=300)
         self.guild_id = guild_id
-        self.select_menu = TimeMessageDeleteSelect()
-        self.add_item(self.select_menu)
-        self.update_select_menu()
         enabled = is_feature_enabled(guild_id, "timemsg")
-        self.toggle_enabled.label = "✅ Enabled" if enabled else "❌ Disabled"
+        self.toggle_enabled.label = "✅ Status: On" if enabled else "❌ Status: Off"
         self.toggle_enabled.style = discord.ButtonStyle.success if enabled else discord.ButtonStyle.danger
+
+        if enabled:
+            self.select_menu = TimeMessageDeleteSelect()
+            self.add_item(self.select_menu)
+            self.update_select_menu()
+        else:
+            self.remove_item(self.add_time)
 
     def update_select_menu(self):
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
@@ -801,16 +879,25 @@ class TimeMessageConfigView(ui.View):
             self.select_menu.options = [discord.SelectOption(label="No scheduled announcements", value="none")]
             self.select_menu.disabled = True
 
-    @ui.button(label="⏰ Add Time Message", style=discord.ButtonStyle.success, row=0)
-    async def add_time(self, interaction: discord.Interaction, button: ui.Button): await interaction.response.send_modal(AnnouncementModal(self))
-
-    @ui.button(label="✅ Enabled", style=discord.ButtonStyle.success, row=0)
-    async def toggle_enabled(self, interaction: discord.Interaction, button: ui.Button):
-        cur = is_feature_enabled(self.guild_id, "timemsg")
-        set_feature_enabled(self.guild_id, "timemsg", not cur)
-        button.label = "✅ Enabled" if not cur else "❌ Disabled"
-        button.style = discord.ButtonStyle.success if not cur else discord.ButtonStyle.danger
-        await interaction.response.edit_message(view=self)
+    def build_embed(self, guild: discord.Guild) -> discord.Embed:
+        enabled = is_feature_enabled(self.guild_id, "timemsg")
+        embed = discord.Embed(title="⏰ Auto Time Message Settings", color=0x3498db if enabled else 0x2b2d31)
+        if not enabled:
+            embed.description = "Status: **off**"
+        else:
+            conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+            cursor.execute("SELECT time, message, channel_id FROM announcements")
+            all_rows = cursor.fetchall(); conn.close()
+            lines = []
+            for t_time, msg, cid in all_rows:
+                channel = bot.get_channel(int(cid))
+                if channel and channel.guild.id == self.guild_id:
+                    short_msg = msg[:30] + "..." if len(msg) > 30 else msg
+                    lines.append(f"{t_time} GMT {short_msg}")
+            sched_text = "\n".join(lines) if lines else "Not set"
+            embed.description = f"Status: **on**\n\n**Now schedule:**\n{sched_text}"
+        embed.set_footer(text=f"{guild.name}｜67")
+        return embed
 
     @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=0)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
@@ -818,13 +905,27 @@ class TimeMessageConfigView(ui.View):
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=SettingsView())
 
+    @ui.button(label="❌ Status: Off", style=discord.ButtonStyle.danger, row=0)
+    async def toggle_enabled(self, interaction: discord.Interaction, button: ui.Button):
+        cur = is_feature_enabled(self.guild_id, "timemsg")
+        set_feature_enabled(self.guild_id, "timemsg", not cur)
+        new_view = TimeMessageConfigView(interaction.guild_id)
+        await interaction.response.edit_message(embed=new_view.build_embed(interaction.guild), view=new_view)
+
+    @ui.button(label="⏰ Add Time Message", style=discord.ButtonStyle.success, row=0)
+    async def add_time(self, interaction: discord.Interaction, button: ui.Button): await interaction.response.send_modal(AnnouncementModal(self))
+
 # =================================================================
 # 🔥 Streaks 系統 UI
 # =================================================================
 
+
+
+
+
+
 class StreaksNumberModal(ui.Modal, title="Set Daily Streaks Message Count"):
     value = ui.TextInput(label="Messages needed per day (1-999)", required=True, max_length=3)
-
     def __init__(self, view: 'StreaksMainView'):
         super().__init__()
         self.view = view
@@ -937,42 +1038,60 @@ class StreaksMainView(ui.View):
         self.toggle_enabled.label = "✅ Status: On" if enabled else "❌ Status: Off"
         self.toggle_enabled.style = discord.ButtonStyle.success if enabled else discord.ButtonStyle.danger
 
-    def build_embed(self, guild: discord.Guild) -> discord.Embed:
-        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-        cursor.execute("SELECT messages_needed, notify_channel_id, nick_threshold, nick_emoji FROM streaks_settings WHERE guild_id = ?", (str(self.guild_id),))
-        row = cursor.fetchone(); conn.close()
-        msgneeded, channel_id, nick_threshold, nick_emoji = row if row else (20, None, 3, '🔥')
-        status = "on" if is_feature_enabled(self.guild_id, "streaks") else "off"
-        ch_text = f"<#{channel_id}>" if channel_id else "Not set"
+        if not enabled:
+            self.remove_item(self.set_channel)
+            self.remove_item(self.set_msgneeded)
+            self.remove_item(self.set_nickname_condition)
+            self.remove_item(self.role_rewards)
 
-        embed = discord.Embed(
-            title="🔥 Streaks System Settings",
-            color=0xff6600,
-            description=(
-                f"Status: **{status}**\n"
+    def build_embed(self, guild: discord.Guild) -> discord.Embed:
+        enabled = is_feature_enabled(self.guild_id, "streaks")
+        embed = discord.Embed(title="🔥 Streaks System Settings", color=0xff6600 if enabled else 0x2b2d31)
+        if not enabled:
+            embed.description = "Status: **off**"
+        else:
+            conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+            cursor.execute("SELECT messages_needed, notify_channel_id, nick_threshold, nick_emoji FROM streaks_settings WHERE guild_id = ?", (str(self.guild_id),))
+            row = cursor.fetchone(); conn.close()
+            msgneeded, channel_id, nick_threshold, nick_emoji = row if row else (20, None, 3, '🔥')
+            ch_text = f"<#{channel_id}>" if channel_id else "Not set"
+            embed.description = (
+                f"Status: **on**\n"
                 f"Daily streaks message: **{msgneeded}**\n"
                 f"Show emoji {nick_emoji} if streaks more than **{nick_threshold}** days\n"
                 f"Notification channel: {ch_text}"
             )
-        )
         embed.set_footer(text=f"{guild.name}｜67")
         return embed
 
-    @ui.button(label="📢 Notification Channel", style=discord.ButtonStyle.blurple, row=0)
+    @ui.button(label="🔙 Back", style=discord.ButtonStyle.gray, row=0)
+    async def back(self, interaction: discord.Interaction, button: ui.Button):
+        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nAuto Mute\nTime Message")
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
+        await interaction.response.edit_message(embed=embed, view=SettingsView())
+
+    @ui.button(label="❌ Status: Off", style=discord.ButtonStyle.danger, row=0)
+    async def toggle_enabled(self, interaction: discord.Interaction, button: ui.Button):
+        cur = is_feature_enabled(self.guild_id, "streaks")
+        set_feature_enabled(self.guild_id, "streaks", not cur)
+        new_view = StreaksMainView(interaction.guild_id)
+        await interaction.response.edit_message(embed=new_view.build_embed(interaction.guild), view=new_view)
+
+    @ui.button(label="📢 Notification Channel", style=discord.ButtonStyle.blurple, row=1)
     async def set_channel(self, interaction: discord.Interaction, button: ui.Button):
         embed = discord.Embed(title="🔔 Select Notification Channel", color=0x2b2d31)
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=StreaksChannelSelectView(self.guild_id, self))
 
-    @ui.button(label="✏️ Daily Message Count", style=discord.ButtonStyle.blurple, row=0)
+    @ui.button(label="✏️ Daily Message Count", style=discord.ButtonStyle.blurple, row=1)
     async def set_msgneeded(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(StreaksNumberModal(self))
 
-    @ui.button(label="😀 Nickname Emoji Condition", style=discord.ButtonStyle.blurple, row=0)
+    @ui.button(label="😀 Nickname Emoji Condition", style=discord.ButtonStyle.blurple, row=1)
     async def set_nickname_condition(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(StreaksNicknameModal(self))
 
-    @ui.button(label="🎭 Role Rewards", style=discord.ButtonStyle.secondary, row=1)
+    @ui.button(label="🎭 Role Rewards", style=discord.ButtonStyle.secondary, row=2)
     async def role_rewards(self, interaction: discord.Interaction, button: ui.Button):
         embed = discord.Embed(
             title="🎭 Streaks Role Rewards", 
