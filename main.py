@@ -361,13 +361,13 @@ class SixSevenBot(commands.Bot):
         self.add_view(OrderActionView())
         await self.tree.sync()
 
-    @tasks.loop(seconds=20)
+    @tasks.loop(seconds=60)
     async def rotate_status(self):
         await self.wait_until_ready()  # 🎯 加上這一行：等待機器人完全準備好
         self.status_index = (self.status_index + 1) % len(WATCHING_STATUSES)
         await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name=WATCHING_STATUSES[self.status_index]))
 
-    @tasks.loop(seconds=15)
+    @tasks.loop(seconds=60)
     async def check_time_announcements(self):
         await self.wait_until_ready()  # 🎯 這一行也順便加，以防萬一
         tz = datetime.timezone(datetime.timedelta(hours=0))
@@ -2021,10 +2021,10 @@ async def setvoice_error(interaction: discord.Interaction, error: app_commands.A
 @app_commands.checks.has_permissions(administrator=True)
 async def addrole(interaction: discord.Interaction, user: discord.Member, role: discord.Role):
     if role in user.roles:
-        return await interaction.response.send_message(f"❌ {user.mention} 已經擁有 {role.name} 身分組了！", ephemeral=True)
+        return await interaction.response.send_message(f"❌ {user.mention} already owned {role.name}.", ephemeral=True)
     try:
         await user.add_roles(role)
-        await interaction.response.send_message(f"✅ 已成功將身分組 {role.mention} 給予 {user.mention}", ephemeral=True)
+        await interaction.response.send_message(f"✅ Give role {role.mention} to {user.mention}.", ephemeral=True)
     except discord.Forbidden:
         await interaction.response.send_message("❌ 機器人權限不足！請確認機器人的最高身分組階層「高於」你想操作的身分組。", ephemeral=True)
 
@@ -2038,6 +2038,47 @@ async def removerole(interaction: discord.Interaction, user: discord.Member, rol
         await interaction.response.send_message(f"✅ 已成功將 {user.mention} 的身分組 {role.mention} 移除", ephemeral=True)
     except discord.Forbidden:
         await interaction.response.send_message("❌ 機器人權限不足，無法移除該身分組！", ephemeral=True)
+
+@bot.tree.command(name="setstreaks", description="Flooding or reducing the number of Streaks days.")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(user="Users who are subject to spam or have their Streaks days reduced.", streaks="Set Streaks days. (>=0)")
+async def setstreaks(interaction: discord.Interaction, user: discord.Member, streaks: int):
+    if streaks < 0:
+        return await interaction.response.send_message("❌ Ur math teather is crying.", ephemeral=True)
+    
+    gid = str(interaction.guild_id)
+    uid = str(user.id)
+    
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # 📝 檢查該用戶在 streaks_data 是否已有資料，用以維護「最長連擊紀錄 (longest_streak)」
+    cursor.execute("SELECT longest_streak FROM streaks_data WHERE guild_id = ? AND user_id = ?", (gid, uid))
+    row = cursor.fetchone()
+    
+    if row:
+        old_longest = row[0]
+        new_longest = max(old_longest, streaks)  # 如果新設定的天數大於歷史紀錄，就同步更新最長紀錄
+        cursor.execute("""
+            UPDATE streaks_data 
+            SET current_streak = ?, longest_streak = ? 
+            WHERE guild_id = ? AND user_id = ?
+        """, (streaks, new_longest, gid, uid))
+    else:
+        # 若無歷史資料，則直接新增一筆
+        cursor.execute("""
+            INSERT INTO streaks_data (guild_id, user_id, current_streak, longest_streak) 
+            VALUES (?, ?, ?, ?)
+        """, (gid, uid, streaks, streaks))
+        
+    conn.commit()
+    conn.close()
+    
+    # 🎯 自動補強：手動調天數後，自動觸發機器人內建的「身分組發放」與「暱稱表情符號」檢查
+    await check_streak_roles(user, streaks)
+    await apply_streak_nickname(user, streaks)
+    
+    await interaction.response.send_message(f"🔥 Now {user.mention}'s Streaks had setted to **{streaks}** days!", ephemeral=True)
 
 # =================================================================
 # ⚡ 7. SYSTEM EVENTS
