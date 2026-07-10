@@ -1100,34 +1100,19 @@ class StreaksMainView(ui.View):
         )
         await interaction.response.edit_message(embed=embed, view=StreaksRoleSettingsView(self))
 
-    @ui.button(label="✅ Status: On", style=discord.ButtonStyle.success, row=1)
-    async def toggle_enabled(self, interaction: discord.Interaction, button: ui.Button):
-        cur = is_feature_enabled(self.guild_id, "streaks")
-        set_feature_enabled(self.guild_id, "streaks", not cur)
-        button.label = "✅ Status: On" if not cur else "❌ Status: Off"
-        button.style = discord.ButtonStyle.success if not cur else discord.ButtonStyle.danger
-        embed = self.build_embed(interaction.guild)
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    @ui.button(label="🔙 Back", style=discord.ButtonStyle.gray, row=2)
-    async def back(self, interaction: discord.Interaction, button: ui.Button):
-        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nAuto Mute\nTime Message")
-        embed.set_footer(text=f"{interaction.guild.name}｜67")
-        await interaction.response.edit_message(embed=embed, view=SettingsView())
-
 class SettingsView(ui.View):
     def __init__(self): super().__init__(timeout=None)
     @ui.button(label="Welcome/Goodbye Panel", style=discord.ButtonStyle.secondary, emoji="👋")
     async def btn_w(self, interaction: discord.Interaction, btn: ui.Button):
-        embed = discord.Embed(title="👋 Welcome & Goodbye Settings", color=0x54a7dd, description="Select the target channel first, I will let u edit the embed content later.。")
-        embed.set_footer(text=f"{interaction.guild.name}｜67")
-        await interaction.response.edit_message(embed=embed, view=WelcomeConfigView(interaction.guild_id))
+        view = WelcomeConfigView(interaction.guild_id)
+        embed = view.build_embed(interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=view)
         
     @ui.button(label="Level System", style=discord.ButtonStyle.secondary, emoji="🎉")
     async def btn_l(self, interaction: discord.Interaction, btn: ui.Button):
-        embed = discord.Embed(title="📈 Level System Configuration", color=0x2ecc71, description="Set level up channel, message, and level-role rewards below.")
-        embed.set_footer(text=f"{interaction.guild.name}｜67")
-        await interaction.response.edit_message(embed=embed, view=LevelSettingsView(interaction.guild_id))
+        view = LevelSettingsView(interaction.guild_id)
+        embed = view.build_embed(interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=view)
 
     @ui.button(label="Streaks", style=discord.ButtonStyle.secondary, emoji="🔥")
     async def btn_s(self, interaction: discord.Interaction, btn: ui.Button):
@@ -1137,15 +1122,15 @@ class SettingsView(ui.View):
         
     @ui.button(label="Auto Mute", style=discord.ButtonStyle.secondary, emoji="🔒")
     async def btn_a(self, interaction: discord.Interaction, btn: ui.Button):
-        embed = discord.Embed(title="🔒 Auto Mute Filter Config Hub", color=0xff0000, description="Create text filtering parameters or remove existing configurations below.")
-        embed.set_footer(text=f"{interaction.guild.name}｜67")
-        await interaction.response.edit_message(embed=embed, view=AutoMuteConfigView(interaction.guild_id))
+        view = AutoMuteConfigView(interaction.guild_id)
+        embed = view.build_embed(interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=view)
         
     @ui.button(label="Time Message", style=discord.ButtonStyle.secondary, emoji="⏰")
     async def btn_t(self, interaction: discord.Interaction, btn: ui.Button):
-        embed = discord.Embed(title="⏰ Time Message Alerts Hub", color=0x3498db, description="Schedule timed standard text warnings or clear past records below.")
-        embed.set_footer(text=f"{interaction.guild.name}｜67")
-        await interaction.response.edit_message(embed=embed, view=TimeMessageConfigView(interaction.guild_id))
+        view = TimeMessageConfigView(interaction.guild_id)
+        embed = view.build_embed(interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=view)
 
 # =================================================================
 # 🛒 OSLF飛機銷售專用
