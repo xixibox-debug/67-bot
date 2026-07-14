@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands, ui
