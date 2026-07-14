@@ -3,3 +3,4 @@ Pillow
 openai
 PyNaCl>=1.5.0
 libsql
+python-dotenv
