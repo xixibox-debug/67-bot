@@ -516,7 +516,7 @@ class WelcomeConfigView(ui.View):
             cursor.execute("SELECT channel_id FROM welcome WHERE guild_id = ?", (str(guild_id),))
             row = cursor.fetchone()
             conn.close()
-            if row and row[0]:
+            if row and row[0] and str(row[0]).isdigit():
                 self.set_channel.default_values = [discord.Object(id=int(row[0]))]
 
     def build_embed(self, guild: discord.Guild) -> discord.Embed:
@@ -978,7 +978,7 @@ class StreaksChannelSelectView(ui.View):
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
         cursor.execute("SELECT notify_channel_id FROM streaks_settings WHERE guild_id = ?", (str(guild_id),))
         row = cursor.fetchone(); conn.close()
-        if row and row[0]:
+        if row and row[0] and str(row[0]).isdigit():
             self.select_channel.default_values = [discord.Object(id=int(row[0]))]
 
     @ui.select(cls=ui.ChannelSelect, channel_types=[discord.ChannelType.text], placeholder="🔔 Select Notification Channel")
@@ -2192,7 +2192,7 @@ async def on_member_join(member: discord.Member):
         cursor.execute("SELECT channel_id, w_title, w_desc FROM welcome WHERE guild_id = ?", (str(guild.id),))
         row = cursor.fetchone(); conn.close()
         
-        if row and row[0]:
+        if row and row[0] and str(row[0]).isdigit():
             try:
                 channel_id = int(row[0])
                 channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
@@ -2227,7 +2227,7 @@ async def on_member_remove(member: discord.Member):
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
         cursor.execute("SELECT channel_id, g_title, g_desc FROM welcome WHERE guild_id = ?", (str(member.guild.id),))
         row = cursor.fetchone(); conn.close()
-        if row and row[0]:
+        if row and row[0] and str(row[0]).isdigit():
             try:
                 channel_id = int(row[0])
                 channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
