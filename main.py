@@ -359,8 +359,12 @@ INVITE_URL = "https://discord.com/oauth2/authorize?client_id=1509040704406556682
 
 class SixSevenTree(app_commands.CommandTree):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        # 只檢查「機器人真的是這個伺服器的成員」的情況；私訊、個人安裝在未加入的伺服器都跳過這個檢查
-        if interaction.guild is not None and interaction.guild.me is not None:
+        # 🎯 用 bot.get_guild() 才是準確的「機器人真的有加入這個伺服器」判斷。
+        # interaction.guild.me 在 bot 沒加入該伺服器時會 fallback 回傳 ClientUser 而不是 None，
+        # 用「is not None」判斷永遠是 True，會誤判個人安裝在外部伺服器的情況。
+        guild = bot.get_guild(interaction.guild_id) if interaction.guild_id else None
+
+        if guild is not None:
             conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
             cursor.execute("SELECT 1 FROM guild_webhooks WHERE guild_id = ?", (str(interaction.guild_id),))
             has_webhook = cursor.fetchone() is not None
@@ -2217,7 +2221,15 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
                 conn.commit(); conn.close()
 
 async def ensure_guild_webhook(guild: discord.Guild):
-    """幫指定伺服器建立一個 Webhook 備用（給之後跨平台發射台架構用），成功才會寫進 guild_webhooks 表"""
+    """幫指定伺服器確保有一個 Webhook 可用，優先沿用既有的，不會重複建立"""
+    # 🎯 資料庫已經有紀錄就直接跳過，不用再做任何事
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("SELECT webhook_url FROM guild_webhooks WHERE guild_id = ?", (str(guild.id),))
+    row = cursor.fetchone()
+    conn.close()
+    if row and row[0]:
+        return
+
     target_channel = None
     candidates = [guild.system_channel] if guild.system_channel else []
     candidates += guild.text_channels
@@ -2231,19 +2243,32 @@ async def ensure_guild_webhook(guild: discord.Guild):
         return
 
     try:
-        webhook = await target_channel.create_webhook(name="67 Bot Webhook")
+        # 🎯 先查 Discord 那邊這個伺服器有沒有已經存在、我們自己建立過的同名 Webhook，有就直接沿用
+        existing_webhooks = await guild.webhooks()
+        existing = discord.utils.find(
+            lambda w: w.name == "67 Bot Webhook" and w.user and w.user.id == bot.user.id,
+            existing_webhooks
+        )
+
+        if existing:
+            webhook = existing
+            used_channel_id = webhook.channel_id
+            logger.info(f"[Webhook 沿用既有] {guild.name} 已經有一個，直接沿用，不重新建立")
+        else:
+            webhook = await target_channel.create_webhook(name="67 Bot Webhook")
+            used_channel_id = target_channel.id
+            logger.info(f"[Webhook 建立成功] {guild.name} -> #{target_channel.name}")
+
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
         cursor.execute(
             "INSERT OR REPLACE INTO guild_webhooks (guild_id, webhook_url, channel_id) VALUES (?, ?, ?)",
-            (str(guild.id), webhook.url, str(target_channel.id))
+            (str(guild.id), webhook.url, str(used_channel_id))
         )
         conn.commit(); conn.close()
-        logger.info(f"[Webhook 建立成功] {guild.name} -> #{target_channel.name}")
     except discord.Forbidden:
-        logger.warning(f"[Webhook 建立失敗] 沒有權限在 {guild.name} 建立 Webhook")
+        logger.warning(f"[Webhook 建立失敗] 沒有權限在 {guild.name} 建立/讀取 Webhook")
     except Exception as e:
         logger.error(f"[Webhook 建立錯誤] {guild.name}: {e}")
-
 
 @bot.event
 async def on_guild_join(guild: discord.Guild):
