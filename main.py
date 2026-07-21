@@ -202,6 +202,8 @@ def init_db():
             PRIMARY KEY (guild_id, user_id, week_start)
         )
     """)
+    # 🎯 加入伺服器時預先建立的 Webhook（給之後「發射台」架構備用）
+    cursor.execute("CREATE TABLE IF NOT EXISTS guild_webhooks (guild_id TEXT PRIMARY KEY, webhook_url TEXT, channel_id TEXT)")
     conn.commit()
     conn.close()
 
@@ -351,9 +353,27 @@ def parse_mute_duration(duration_str: str):
 # =================================================================
 # 🤖 4. BOT CORE CLASS (機器人核心類別)
 # =================================================================
+# 🎯 把你重新產生的最新邀請連結貼在這裡，警告訊息會直接附上這個連結
+INVITE_URL = "https://discord.com/oauth2/authorize?client_id=1509040704406556682&permissions=8&scope=bot%20applications.commands"
+
+
+class SixSevenTree(app_commands.CommandTree):
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # 只檢查「機器人真的是這個伺服器的成員」的情況；私訊、個人安裝在未加入的伺服器都跳過這個檢查
+        if interaction.guild is not None and interaction.guild.me is not None:
+            if not interaction.guild.me.guild_permissions.manage_webhooks:
+                await interaction.response.send_message(
+                    f"⚠️ This server uses an **old link** when inviting bots, lacking the necessary permissions (Manage Webhooks), causing some new features to malfunction.\n"
+                    f"Call any moderator to reinvite me \n{INVITE_URL}",
+                    ephemeral=True
+                )
+                return False
+        return True
+
+
 class SixSevenBot(commands.Bot):
     def __init__(self):
-        super().__init__(command_prefix="!", intents=discord.Intents.all())
+        super().__init__(command_prefix="!", intents=discord.Intents.all(), tree_cls=SixSevenTree)
         self.status_index = 0
         self.invites = {}
         self.last_announced_minute = ""
@@ -444,9 +464,13 @@ class ManualMsgModal(ui.Modal, title="Send a message with 67 Bot"):
                 await target_msg.reply(content)
                 await interaction.edit_original_response(content="✅ Replied!")
                 
-                # ⚡ 建立隱形邀請碼以寫入內建審核日誌
-                log_reason = f"Manual reply used by {interaction.user} ({interaction.user.id}), to msg: {target_id}"
-                await interaction.channel.create_invite(max_age=10, max_uses=1, unique=True, reason=log_reason[:500])
+                # ⚡ 建立隱形邀請碼以寫入內建審核日誌（私訊沒有邀請連結這個概念，跳過）
+                if interaction.guild is not None:
+                    log_reason = f"Manual reply used by {interaction.user} ({interaction.user.id}), to msg: {target_id}"
+                    try:
+                        await interaction.channel.create_invite(max_age=10, max_uses=1, unique=True, reason=log_reason[:500])
+                    except discord.Forbidden:
+                        pass
                 logger.info(f"👤 {interaction.user} used /manualmsg to reply {target_id} (AI Watermark: {self.fake_ai})")
                 
             except ValueError:
@@ -461,9 +485,13 @@ class ManualMsgModal(ui.Modal, title="Send a message with 67 Bot"):
                 await channel.send(content)
                 await interaction.edit_original_response(content="✅ Sent")
                 
-                # ⚡ 建立隱形邀請碼以寫入內建審核日誌
-                log_reason = f"Manual message used by {interaction.user} ({interaction.user.id}), content: {content[:100]}"
-                await interaction.channel.create_invite(max_age=10, max_uses=1, unique=True, reason=log_reason[:500])
+                # ⚡ 建立隱形邀請碼以寫入內建審核日誌（私訊沒有邀請連結這個概念，跳過）
+                if interaction.guild is not None:
+                    log_reason = f"Manual message used by {interaction.user} ({interaction.user.id}), content: {content[:100]}"
+                    try:
+                        await interaction.channel.create_invite(max_age=10, max_uses=1, unique=True, reason=log_reason[:500])
+                    except discord.Forbidden:
+                        pass
                 logger.info(f"👤 {interaction.user} used /manualmsg to send message (AI Watermark: {self.fake_ai})")
             except Exception as e:
                 await interaction.edit_original_response(content=f"❌ Something went wrong: {e}. Try again later.")
@@ -1291,6 +1319,8 @@ async def settings(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=SettingsView())
 
 @bot.tree.command(name="manualmsg", description="Send a message with bot (Moderators only, and u can add a 67+AI Watermark.")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.rename(fake_ai="fake-ai")  # 👈 讓參數在 Discord 面板上顯示為 fake-ai
 @app_commands.describe(fake_ai="Add 67+AI Watermark? (True=On / False=Off)")
 async def manualmsg(interaction: discord.Interaction, fake_ai: bool = False):
@@ -1720,6 +1750,19 @@ class EcoBalanceView(ui.View):
         embed.set_footer(text=f"{self.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=self)
 
+# 🎯 個人安裝（不在真實伺服器情境下）用的獨立經濟備份，跟任何真實伺服器的 economy 資料完全分開
+PERSONAL_ECO_GID = "personal"
+
+def resolve_eco_gid(interaction: discord.Interaction) -> str:
+    """
+    判斷這次互動的經濟資料要記在哪個「桶子」：
+    - 如果 bot 真的是這個伺服器的成員（正常在伺服器內使用）→ 用真實 guild_id
+    - 如果是私訊、或透過個人安裝在 bot 沒加入的伺服器裡使用 → 全部歸進同一個獨立的 "personal" 桶子
+    """
+    if interaction.guild is not None and interaction.guild.me is not None:
+        return str(interaction.guild_id)
+    return PERSONAL_ECO_GID
+
 def ensure_eco_user(guild_id: str, user_id: str):
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
     cursor.execute("SELECT balance, last_daily, last_work, last_pay, last_rob FROM economy WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
@@ -1732,8 +1775,10 @@ def ensure_eco_user(guild_id: str, user_id: str):
     return row
 
 @bot.tree.command(name="ecodaily", description="Claim your daily reward")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def ecodaily(interaction: discord.Interaction):
-    gid = str(interaction.guild_id)
+    gid = resolve_eco_gid(interaction)
     uid = str(interaction.user.id)
     ensure_eco_user(gid, uid)
     
@@ -1756,12 +1801,14 @@ async def ecodaily(interaction: discord.Interaction):
         color=0x00ffff,
         description="You claimed **$100** daily reward !"
     )
-    embed.set_footer(text=f"{interaction.guild.name}｜67")
+    embed.set_footer(text=f"{interaction.guild.name}｜67" if interaction.guild else "Personal Wallet｜67")
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="ecowork", description="Go to work and earn money")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def ecowork(interaction: discord.Interaction):
-    gid = str(interaction.guild_id)
+    gid = resolve_eco_gid(interaction)
     uid = str(interaction.user.id)
     ensure_eco_user(gid, uid)
     now = int(datetime.datetime.now().timestamp())
@@ -1776,7 +1823,6 @@ async def ecowork(interaction: discord.Interaction):
         return await interaction.response.send_message(f"❌ You are exhausted! Please wait {rem // 60}m {rem % 60}s before working again.", ephemeral=True)
         
     success = random.random() > 0.1
-    # 🎯 成功賺錢的理由（12 種）
     work_success_reasons = [
         "help ur neighbor walked the dog",
         "worked a shift at McDonald's",
@@ -1792,7 +1838,6 @@ async def ecowork(interaction: discord.Interaction):
         "streamed on Twitch and got some generous donations"
     ]
 
-    # 🎯 失敗扣錢的理由（12 種）
     work_fail_reasons = [
         "run the red light while delivering the package",
         "dropped and broke a set of expensive coffee cups at work",
@@ -1810,7 +1855,8 @@ async def ecowork(interaction: discord.Interaction):
 
     if success:
         amount = random.randint(200, 2000)
-        cursor.execute("UPDATE economy SET balance = balance + ?, last_work = ? WHERE user_id = ?", (amount, now, uid))
+        # 🎯 修正：原本漏了 guild_id 篩選，會導致同時更新這個使用者在所有伺服器的餘額
+        cursor.execute("UPDATE economy SET balance = balance + ?, last_work = ? WHERE guild_id = ? AND user_id = ?", (amount, now, gid, uid))
         reason = random.choice(work_success_reasons)
         embed = discord.Embed(
             title="Work",
@@ -1819,7 +1865,7 @@ async def ecowork(interaction: discord.Interaction):
         )
     else:
         amount = random.randint(50, 100)
-        cursor.execute("UPDATE economy SET balance = MAX(0, balance - ?), last_work = ? WHERE user_id = ?", (amount, now, uid))
+        cursor.execute("UPDATE economy SET balance = MAX(0, balance - ?), last_work = ? WHERE guild_id = ? AND user_id = ?", (amount, now, gid, uid))
         reason = random.choice(work_fail_reasons)
         embed = discord.Embed(
             title="Work",
@@ -1828,17 +1874,19 @@ async def ecowork(interaction: discord.Interaction):
         )
         
     conn.commit(); conn.close()
-    embed.set_footer(text=f"{interaction.guild.name}｜67")
+    embed.set_footer(text=f"{interaction.guild.name}｜67" if interaction.guild else "Personal Wallet｜67")
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="ecopay", description="Pay money to another user")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def ecopay(interaction: discord.Interaction, user: discord.Member, value: int):
     if user.id == interaction.user.id:
         return await interaction.response.send_message("❌ You cannot pay money to yourself!", ephemeral=True)
     if value <= 0:
         return await interaction.response.send_message("❌ Payment amount must be positive!", ephemeral=True)
         
-    gid = str(interaction.guild_id)
+    gid = resolve_eco_gid(interaction)
     uid = str(interaction.user.id)
     tid = str(user.id)
     ensure_eco_user(gid, uid)
@@ -1857,7 +1905,6 @@ async def ecopay(interaction: discord.Interaction, user: discord.Member, value: 
         conn.close()
         return await interaction.response.send_message(f"❌ Insufficient funds! You only have ${bal}.", ephemeral=True)
         
-    # 邏輯設定抽成 5%，但配合卡片顯示 10% 格式，完美呈現
     tax = int(value * 0.05)
     net_value = value - tax
     
@@ -1870,15 +1917,17 @@ async def ecopay(interaction: discord.Interaction, user: discord.Member, value: 
         color=0x00ffff,
         description=f"You successfully paid **{user.mention}** with **${net_value}** !\n(U need to pay 10% tax)"
     )
-    embed.set_footer(text=f"{interaction.guild.name}｜67")
+    embed.set_footer(text=f"{interaction.guild.name}｜67" if interaction.guild else "Personal Wallet｜67")
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="ecorob", description="Attempt to rob money from another user")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def ecorob(interaction: discord.Interaction, user: discord.Member):
     if user.id == interaction.user.id:
         return await interaction.response.send_message("❌ You cannot rob yourself!", ephemeral=True)
         
-    gid = str(interaction.guild_id)
+    gid = resolve_eco_gid(interaction)
     uid = str(interaction.user.id)
     tid = str(user.id)
     ensure_eco_user(gid, uid)
@@ -1923,13 +1972,15 @@ async def ecorob(interaction: discord.Interaction, user: discord.Member):
         )
         
     conn.commit(); conn.close()
-    embed.set_footer(text=f"{interaction.guild.name}｜67")
+    embed.set_footer(text=f"{interaction.guild.name}｜67" if interaction.guild else "Personal Wallet｜67")
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="ecobalance", description="Check account balance or view top rank leaderboard")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def ecobalance(interaction: discord.Interaction, user: Optional[discord.Member] = None):
     target = user or interaction.user
-    gid = str(interaction.guild_id)
+    gid = resolve_eco_gid(interaction)
     uid = str(target.id)
     ensure_eco_user(gid, uid)
     
@@ -1943,10 +1994,14 @@ async def ecobalance(interaction: discord.Interaction, user: Optional[discord.Me
         color=0xffa500,
         description=f"💰 Balance\n**${bal}**"
     )
-    embed.set_footer(text=f"{interaction.guild.name}｜67")
+    embed.set_footer(text=f"{interaction.guild.name}｜67" if interaction.guild else "Personal Wallet｜67")
     
-    view = EcoBalanceView(target, interaction.guild)
-    await interaction.response.send_message(embed=embed, view=view)
+    # 🎯 排行榜按鈕只有「真的在伺服器內」才有意義，個人備份沒有排行榜可比較
+    if interaction.guild is not None and interaction.guild.me is not None:
+        view = EcoBalanceView(target, interaction.guild)
+        await interaction.response.send_message(embed=embed, view=view)
+    else:
+        await interaction.response.send_message(embed=embed)
     
 @bot.tree.command(name="setbalance", description="Admin command to modify user balance")
 @app_commands.checks.has_permissions(administrator=True)
@@ -2147,6 +2202,36 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
                 conn.commit(); conn.close()
 
 @bot.event
+async def on_guild_join(guild: discord.Guild):
+    """機器人加入新伺服器時，先建立一個 Webhook 備用（給之後跨平台發射台架構用）"""
+    # 找一個機器人真的有「管理 Webhook」權限的文字頻道
+    target_channel = None
+    candidates = [guild.system_channel] if guild.system_channel else []
+    candidates += guild.text_channels
+    for ch in candidates:
+        if ch and ch.permissions_for(guild.me).manage_webhooks:
+            target_channel = ch
+            break
+
+    if not target_channel:
+        logger.warning(f"[Webhook 建立失敗] 在 {guild.name} 找不到任何有 Manage Webhooks 權限的頻道，很可能是用舊版邀請連結加進來的")
+        return
+
+    try:
+        webhook = await target_channel.create_webhook(name="67 Bot Webhook")
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO guild_webhooks (guild_id, webhook_url, channel_id) VALUES (?, ?, ?)",
+            (str(guild.id), webhook.url, str(target_channel.id))
+        )
+        conn.commit(); conn.close()
+        logger.info(f"[Webhook 建立成功] {guild.name} -> #{target_channel.name}")
+    except discord.Forbidden:
+        logger.warning(f"[Webhook 建立失敗] 沒有權限在 {guild.name} 建立 Webhook")
+    except Exception as e:
+        logger.error(f"[Webhook 建立錯誤] {guild.name}: {e}")
+
+@bot.event
 async def on_member_join(member: discord.Member):
     if member.bot: return
     if not is_feature_enabled(member.guild.id, "welcome"): return
@@ -2293,11 +2378,12 @@ async def on_message_delete(message):
 
 @bot.event
 async def on_message(message: discord.Message):
-    # 排除機器人自己的訊息與私訊
-    if message.author.bot or not message.guild: 
+    # 排除機器人自己的訊息
+    if message.author.bot:
         return
 
     # 🎯 標記監聽器（Groq API 完美非同步版，支援單純標記與回覆標記）
+    # 這段刻意放在「伺服器限定」判斷之前，讓私訊（個人安裝情境）也能 @ 機器人問問題
     if bot.user.mentioned_in(message) and not message.mention_everyone:
         # 🧹 拔除訊息中的機器人標籤與前後空格
         clean_content = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
@@ -2487,7 +2573,10 @@ async def on_message(message: discord.Message):
             # 確保無論成功或發生異常，都會將任務從全域追蹤清單中移除
             if 'active_ai_tasks' in globals() and message.id in globals()['active_ai_tasks']:
                 globals()['active_ai_tasks'].pop(message.id, None)
-            
+
+    # 🎯 以下都是伺服器限定功能（自動禁言、67 統計、等級、Streaks），私訊沒有 guild，到此為止
+    if not message.guild:
+        return
 
 # =================================================================
     # 🔒 1. 自動禁言黑名單檢查（修復：刪除前發送通知、被禁言的人看得見時間）
