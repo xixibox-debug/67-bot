@@ -361,10 +361,15 @@ class SixSevenTree(app_commands.CommandTree):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         # 只檢查「機器人真的是這個伺服器的成員」的情況；私訊、個人安裝在未加入的伺服器都跳過這個檢查
         if interaction.guild is not None and interaction.guild.me is not None:
-            if not interaction.guild.me.guild_permissions.manage_webhooks:
+            conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM guild_webhooks WHERE guild_id = ?", (str(interaction.guild_id),))
+            has_webhook = cursor.fetchone() is not None
+            conn.close()
+
+            if not has_webhook:
                 await interaction.response.send_message(
-                    f"⚠️ This server uses an **old link** when inviting bots, lacking the necessary permissions (Manage Webhooks), causing some new features to malfunction.\n"
-                    f"Call any moderator to reinvite me \n{INVITE_URL}",
+                    f"⚠️ 這個伺服器邀請機器人時用的是**舊版連結**，缺少必要權限（Manage Webhooks），部分新功能無法正常運作。\n"
+                    f"請伺服器管理員用這個最新的連結**重新邀請**一次機器人：\n{INVITE_URL}",
                     ephemeral=True
                 )
                 return False
@@ -2149,6 +2154,16 @@ async def on_ready():
         try: bot.invites[guild.id] = await guild.invites()
         except: pass
 
+    # 🎯 幫還沒有 Webhook 紀錄的既有伺服器（bot 加入時這個功能還不存在）補跑一次
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("SELECT guild_id FROM guild_webhooks")
+    have_webhook_ids = {row[0] for row in cursor.fetchall()}
+    conn.close()
+
+    for guild in bot.guilds:
+        if str(guild.id) not in have_webhook_ids:
+            await ensure_guild_webhook(guild)
+
     # 🎯 重新連線先前設定的語音追蹤頻道（重啟後恢復，上限 5 個）
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
     cursor.execute("SELECT guild_id, channel_id FROM voice_watch")
@@ -2201,10 +2216,8 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
                 )
                 conn.commit(); conn.close()
 
-@bot.event
-async def on_guild_join(guild: discord.Guild):
-    """機器人加入新伺服器時，先建立一個 Webhook 備用（給之後跨平台發射台架構用）"""
-    # 找一個機器人真的有「管理 Webhook」權限的文字頻道
+async def ensure_guild_webhook(guild: discord.Guild):
+    """幫指定伺服器建立一個 Webhook 備用（給之後跨平台發射台架構用），成功才會寫進 guild_webhooks 表"""
     target_channel = None
     candidates = [guild.system_channel] if guild.system_channel else []
     candidates += guild.text_channels
@@ -2230,6 +2243,11 @@ async def on_guild_join(guild: discord.Guild):
         logger.warning(f"[Webhook 建立失敗] 沒有權限在 {guild.name} 建立 Webhook")
     except Exception as e:
         logger.error(f"[Webhook 建立錯誤] {guild.name}: {e}")
+
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    await ensure_guild_webhook(guild)
 
 @bot.event
 async def on_member_join(member: discord.Member):
