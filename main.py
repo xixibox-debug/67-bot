@@ -163,6 +163,14 @@ def init_db():
             PRIMARY KEY (guild_id, feature)
         )
     """)
+    # 💰 付費解鎖清單（例如「67+Slient」解除自動回覆 67 的限制），只能靠開發者手動新增
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS paid_features (
+            guild_id TEXT,
+            feature TEXT,
+            PRIMARY KEY (guild_id, feature)
+        )
+    """)
     # 🔥 新增：Streaks 系統
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS streaks_settings (
@@ -249,6 +257,21 @@ def set_feature_enabled(guild_id, feature: str, enabled: bool):
     )
     conn.commit(); conn.close()
 
+
+def is_autoreply_enabled(guild_id) -> bool:
+    """67 自動回覆，跟其他功能相反，預設是開啟的"""
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("SELECT enabled FROM feature_toggles WHERE guild_id = ? AND feature = ?", (str(guild_id), "autoreply67"))
+    row = cursor.fetchone(); conn.close()
+    return (row[0] == 1) if row else True  # 🎯 預設開啟
+
+
+def is_paid_guild(guild_id, feature: str) -> bool:
+    """檢查這個伺服器是不是已經手動被加進某個付費功能的白名單"""
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM paid_features WHERE guild_id = ? AND feature = ?", (str(guild_id), feature))
+    row = cursor.fetchone(); conn.close()
+    return row is not None
 
 async def check_streak_roles(member: discord.Member, streak_count: int):
     """達成連擊天數時發放對應身分組"""
@@ -520,13 +543,14 @@ class ManualMsgModal(ui.Modal, title="Send a message with 67 Bot"):
 class WelcomeGoodbyeModal(ui.Modal, title="Set Welcome Message"):
     def __init__(self, cid: str = None, w_t: str = None, w_d: str = None, g_t: str = None, g_d: str = None):
         super().__init__()
-        self.channel = ui.TextInput(label="Select Channel *", default=cid if cid else "(Channel ID Not found)", required=True)
+        # 🎯 頻道一律由 WelcomeConfigView 的 ChannelSelect 下拉選單負責，這裡只留文字內容，
+        # 避免使用者誤把提示字當成有效輸入送出，把非數字的髒資料存進 channel_id
+        self.existing_cid = cid
         self.w_title = ui.TextInput(label="Welcome Embed Title", default=w_t if w_t else "Hey, welcome to {guild.name}!!!", required=False)
         self.w_desc = ui.TextInput(label="Welcome Embed Description *", default=w_d if w_d else "You are the {member.count} member here!\nInviter: {inviter.name}", required=True, style=discord.TextStyle.long)
         self.g_title = ui.TextInput(label="Goodbye Embed Title", default=g_t if g_t else "{user.name} has leave the server", required=False)
         self.g_desc = ui.TextInput(label="Goodbye Embed Description *", default=g_d if g_d else "Whyyyyyy u leave us?????", required=True, style=discord.TextStyle.long)
 
-        self.add_item(self.channel)
         self.add_item(self.w_title)
         self.add_item(self.w_desc)
         self.add_item(self.g_title)
@@ -534,7 +558,11 @@ class WelcomeGoodbyeModal(ui.Modal, title="Set Welcome Message"):
 
     async def on_submit(self, interaction: discord.Interaction):
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-        cursor.execute("INSERT OR REPLACE INTO welcome VALUES (?, ?, ?, ?, ?, ?)", (str(interaction.guild_id), self.channel.value, self.w_title.value, self.w_desc.value, self.g_title.value, self.g_desc.value))
+        # 🎯 保留現有 channel_id 不動，只更新文字內容；沒設過頻道就存 None，等使用者用下拉選單設定
+        cursor.execute(
+            "INSERT OR REPLACE INTO welcome (guild_id, channel_id, w_title, w_desc, g_title, g_desc) VALUES (?, ?, ?, ?, ?, ?)",
+            (str(interaction.guild_id), self.existing_cid, self.w_title.value, self.w_desc.value, self.g_title.value, self.g_desc.value)
+        )
         conn.commit(); conn.close()
         w_t = parse_placeholders(self.w_title.value, interaction.user, interaction.guild)
         w_d = parse_placeholders(self.w_desc.value, interaction.user, interaction.guild)
@@ -542,7 +570,6 @@ class WelcomeGoodbyeModal(ui.Modal, title="Set Welcome Message"):
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.send_message(content="✅ **Embed Text Content Saved!** Preview:", embed=embed, ephemeral=True)
-
 
 class WelcomeConfigView(ui.View):
     def __init__(self, guild_id: int = None):
@@ -562,7 +589,7 @@ class WelcomeConfigView(ui.View):
             cursor.execute("SELECT channel_id FROM welcome WHERE guild_id = ?", (str(guild_id),))
             row = cursor.fetchone()
             conn.close()
-            if row and row[0]:
+            if row and row[0] and str(row[0]).isdigit():
                 self.set_channel.default_values = [discord.Object(id=int(row[0]))]
 
     def build_embed(self, guild: discord.Guild) -> discord.Embed:
@@ -591,7 +618,7 @@ class WelcomeConfigView(ui.View):
     async def back(self, interaction: discord.Interaction, button: ui.Button):
         embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nAuto Mute\nTime Message")
         embed.set_footer(text=f"{interaction.guild.name}｜67")
-        await interaction.response.edit_message(embed=embed, view=SettingsView())
+        await interaction.response.edit_message(embed=embed, view=SettingsView(interaction.guild_id))
 
     @ui.button(label="❌ Status: Off", style=discord.ButtonStyle.danger, row=0)
     async def toggle_enabled(self, interaction: discord.Interaction, button: ui.Button):
@@ -695,7 +722,7 @@ class LevelSettingsView(ui.View):
     async def back(self, interaction: discord.Interaction, button: ui.Button):
         embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nAuto Mute\nTime Message")
         embed.set_footer(text=f"{interaction.guild.name}｜67")
-        await interaction.response.edit_message(embed=embed, view=SettingsView())
+        await interaction.response.edit_message(embed=embed, view=SettingsView(interaction.guild_id))
 
     @ui.button(label="❌ Status: Off", style=discord.ButtonStyle.danger, row=0)
     async def toggle_enabled(self, interaction: discord.Interaction, button: ui.Button):
@@ -855,7 +882,7 @@ class AutoMuteConfigView(ui.View):
     async def back(self, interaction: discord.Interaction, button: ui.Button):
         embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nAuto Mute\nTime Message")
         embed.set_footer(text=f"{interaction.guild.name}｜67")
-        await interaction.response.edit_message(embed=embed, view=SettingsView())
+        await interaction.response.edit_message(embed=embed, view=SettingsView(interaction.guild_id))
 
     @ui.button(label="❌ Status: Off", style=discord.ButtonStyle.danger, row=0)
     async def toggle_enabled(self, interaction: discord.Interaction, button: ui.Button):
@@ -952,7 +979,7 @@ class TimeMessageConfigView(ui.View):
     async def back(self, interaction: discord.Interaction, button: ui.Button):
         embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nAuto Mute\nTime Message")
         embed.set_footer(text=f"{interaction.guild.name}｜67")
-        await interaction.response.edit_message(embed=embed, view=SettingsView())
+        await interaction.response.edit_message(embed=embed, view=SettingsView(interaction.guild_id))
 
     @ui.button(label="❌ Status: Off", style=discord.ButtonStyle.danger, row=0)
     async def toggle_enabled(self, interaction: discord.Interaction, button: ui.Button):
@@ -1117,7 +1144,7 @@ class StreaksMainView(ui.View):
     async def back(self, interaction: discord.Interaction, button: ui.Button):
         embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nAuto Mute\nTime Message")
         embed.set_footer(text=f"{interaction.guild.name}｜67")
-        await interaction.response.edit_message(embed=embed, view=SettingsView())
+        await interaction.response.edit_message(embed=embed, view=SettingsView(interaction.guild_id))
 
     @ui.button(label="❌ Status: Off", style=discord.ButtonStyle.danger, row=0)
     async def toggle_enabled(self, interaction: discord.Interaction, button: ui.Button):
@@ -1150,7 +1177,14 @@ class StreaksMainView(ui.View):
         await interaction.response.edit_message(embed=embed, view=StreaksRoleSettingsView(self))
 
 class SettingsView(ui.View):
-    def __init__(self): super().__init__(timeout=None)
+    def __init__(self, guild_id: int = None):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+        if guild_id:
+            enabled = is_autoreply_enabled(guild_id)
+            self.btn_autoreply.label = "✅ Auto Reply: On" if enabled else "❌ Auto Reply: Off"
+            self.btn_autoreply.style = discord.ButtonStyle.success if enabled else discord.ButtonStyle.secondary
+
     @ui.button(label="Welcome/Goodbye Panel", style=discord.ButtonStyle.secondary, emoji="👋")
     async def btn_w(self, interaction: discord.Interaction, btn: ui.Button):
         view = WelcomeConfigView(interaction.guild_id)
@@ -1180,6 +1214,23 @@ class SettingsView(ui.View):
         view = TimeMessageConfigView(interaction.guild_id)
         embed = view.build_embed(interaction.guild)
         await interaction.response.edit_message(embed=embed, view=view)
+
+    @ui.button(label="✅ Auto Reply: On", style=discord.ButtonStyle.success, emoji="🔁")
+    async def btn_autoreply(self, interaction: discord.Interaction, btn: ui.Button):
+        currently_on = is_autoreply_enabled(interaction.guild_id)
+
+        if currently_on:
+            # 🎯 要關閉之前，先檢查這個伺服器有沒有在付費白名單裡
+            if not is_paid_guild(interaction.guild_id, "67silent"):
+                return await interaction.response.send_message("Seems u haven't buy 67+Slient", ephemeral=True)
+            set_feature_enabled(interaction.guild_id, "autoreply67", False)
+        else:
+            set_feature_enabled(interaction.guild_id, "autoreply67", True)
+
+        new_state = is_autoreply_enabled(interaction.guild_id)
+        btn.label = "✅ Auto Reply: On" if new_state else "❌ Auto Reply: Off"
+        btn.style = discord.ButtonStyle.success if new_state else discord.ButtonStyle.secondary
+        await interaction.response.edit_message(view=self)
 
 # =================================================================
 # 🛒 OSLF飛機銷售專用
@@ -1334,7 +1385,7 @@ async def help_cmd(interaction: discord.Interaction):
 async def settings(interaction: discord.Interaction):
     embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nAuto Mute\nTime Message")
     embed.set_footer(text=f"{interaction.guild.name}｜67")
-    await interaction.response.send_message(embed=embed, view=SettingsView())
+    await interaction.response.send_message(embed=embed, view=SettingsView(interaction.guild_id))
 
 @bot.tree.command(name="manualmsg", description="Send a message with bot (Moderators only, and u can add a 67+AI Watermark.")
 @app_commands.allowed_installs(guilds=True, users=True)
@@ -2174,6 +2225,32 @@ async def setstreaks(interaction: discord.Interaction, user: discord.Member, str
     
     await interaction.response.send_message(f"🔥 Now {user.mention}'s Streaks had setted to **{streaks}** days!", ephemeral=True)
 
+@bot.tree.command(name="addpaidserver", description="[Owner Only] Add a server to a paid feature's whitelist")
+@app_commands.describe(guild_id="The server ID that has paid", feature="The paid feature key, e.g. 67silent")
+async def addpaidserver(interaction: discord.Interaction, guild_id: str, feature: str = "67silent"):
+    if not await bot.is_owner(interaction.user):
+        return await interaction.response.send_message("❌ This command is owner-only.", ephemeral=True)
+
+    if not guild_id.isdigit():
+        return await interaction.response.send_message("❌ guild_id must be numeric.", ephemeral=True)
+
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO paid_features (guild_id, feature) VALUES (?, ?)", (guild_id, feature))
+    conn.commit(); conn.close()
+    await interaction.response.send_message(f"✅ Added guild `{guild_id}` to `{feature}` whitelist.", ephemeral=True)
+
+
+@bot.tree.command(name="removepaidserver", description="[Owner Only] Remove a server from a paid feature's whitelist")
+@app_commands.describe(guild_id="The server ID to remove", feature="The paid feature key, e.g. 67silent")
+async def removepaidserver(interaction: discord.Interaction, guild_id: str, feature: str = "67silent"):
+    if not await bot.is_owner(interaction.user):
+        return await interaction.response.send_message("❌ This command is owner-only.", ephemeral=True)
+
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("DELETE FROM paid_features WHERE guild_id = ? AND feature = ?", (guild_id, feature))
+    conn.commit(); conn.close()
+    await interaction.response.send_message(f"✅ Removed guild `{guild_id}` from `{feature}` whitelist.", ephemeral=True)
+
 # =================================================================
 # ⚡ 7. SYSTEM EVENTS
 # =================================================================
@@ -2698,8 +2775,8 @@ async def on_message(message: discord.Message):
     cleaned = re.sub(r'<@!?\d+>|<@&\d+>|<#\d+>|<a?:[a-zA-Z0-9_]+:\d+>|<t:\d+(?::[a-zA-Z])?>', '', message.content)
     cleaned = re.sub(r'https?://\S+', '', cleaned)  # 🎯 核心修正：利用正規表達式將所有 http/https 網址抹除，防範網址內含 67 造成誤判
     
-    occurrences = cleaned.count("67") + cleaned.count(":six: :seven:")
-    if occurrences > 0:
+    occurrences = cleaned.count("67") + cleaned.count("6️⃣ 7️⃣")
+    if occurrences > 0 and is_autoreply_enabled(message.guild.id):
         await message.reply(f"# {message.author.mention} 67!!!!!")
 
     # =================================================================
