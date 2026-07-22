@@ -459,11 +459,17 @@ class ManualMsgModal(ui.Modal, title="Send a message with 67 Bot"):
         # 先延遲交互回應，避免後續抓取或發送訊息時卡住導致 Token 超時
         await interaction.response.send_message("⏳ Sending...", ephemeral=True)
 
+        # 🎯 用 bot.get_guild() 判斷 bot 是不是「真的」加入這個伺服器（個人安裝在外部伺服器算「不是」）
+        is_real_member = interaction.guild is not None and bot.get_guild(interaction.guild_id) is not None
         channel = interaction.channel
         reply_id_str = self.reply_id.value.strip()
 
         # 3. 判斷是「回覆訊息」還是「直接發送」
         if reply_id_str:
+            if not is_real_member:
+                return await interaction.edit_original_response(
+                    content="❌ 個人安裝在 bot 沒有加入的伺服器時，無法回覆指定訊息（Discord 權限限制），請把 Message ID 欄位留空，改用直接發送模式。"
+                )
             try:
                 target_id = int(reply_id_str)
                 # 嘗試在當前頻道抓取該則要回覆的訊息
@@ -473,13 +479,12 @@ class ManualMsgModal(ui.Modal, title="Send a message with 67 Bot"):
                 await target_msg.reply(content)
                 await interaction.edit_original_response(content="✅ Replied!")
                 
-                # ⚡ 建立隱形邀請碼以寫入內建審核日誌（私訊沒有邀請連結這個概念，跳過）
-                if interaction.guild is not None:
-                    log_reason = f"Manual reply used by {interaction.user} ({interaction.user.id}), to msg: {target_id}"
-                    try:
-                        await interaction.channel.create_invite(max_age=10, max_uses=1, unique=True, reason=log_reason[:500])
-                    except discord.Forbidden:
-                        pass
+                # ⚡ 建立隱形邀請碼以寫入內建審核日誌
+                log_reason = f"Manual reply used by {interaction.user} ({interaction.user.id}), to msg: {target_id}"
+                try:
+                    await interaction.channel.create_invite(max_age=10, max_uses=1, unique=True, reason=log_reason[:500])
+                except discord.Forbidden:
+                    pass
                 logger.info(f"👤 {interaction.user} used /manualmsg to reply {target_id} (AI Watermark: {self.fake_ai})")
                 
             except ValueError:
@@ -491,11 +496,15 @@ class ManualMsgModal(ui.Modal, title="Send a message with 67 Bot"):
         else:
             # 直接發送新訊息
             try:
-                await channel.send(content)
+                if is_real_member:
+                    await channel.send(content)
+                else:
+                    # 🎯 個人安裝在外部伺服器：沒有一般頻道存取權，只能用互動本身的 followup 發送
+                    await interaction.followup.send(content)
                 await interaction.edit_original_response(content="✅ Sent")
                 
-                # ⚡ 建立隱形邀請碼以寫入內建審核日誌（私訊沒有邀請連結這個概念，跳過）
-                if interaction.guild is not None:
+                # ⚡ 建立隱形邀請碼以寫入內建審核日誌（只有真的在伺服器內才能建立）
+                if is_real_member:
                     log_reason = f"Manual message used by {interaction.user} ({interaction.user.id}), content: {content[:100]}"
                     try:
                         await interaction.channel.create_invite(max_age=10, max_uses=1, unique=True, reason=log_reason[:500])
@@ -2027,10 +2036,10 @@ async def setbalance(interaction: discord.Interaction, user: discord.Member, val
     
     await interaction.response.send_message(f"💵 Successfully set {user.name}'s balance to **${value}**.", ephemeral=True)
 
-@bot.tree.command(name="setvoice", description="Let the bot afk in the selected voice channel.")
+@bot.tree.command(name="afkvoice", description="Let the bot afk in the selected voice channel.")
 @app_commands.describe(channel="Choose the target channel, blank means cancelled.")
 @app_commands.checks.has_permissions(administrator=True)
-async def setvoice(interaction: discord.Interaction, channel: Optional[discord.VoiceChannel] = None):
+async def afkvoice(interaction: discord.Interaction, channel: Optional[discord.VoiceChannel] = None):
     await interaction.response.defer()  # 🎯 先延長回應期限到 15 分鐘，避免語音握手超過 3 秒導致沒反應
     gid = str(interaction.guild_id)
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
@@ -2042,26 +2051,44 @@ async def setvoice(interaction: discord.Interaction, channel: Optional[discord.V
         conn.commit(); conn.close()
         return await interaction.followup.send("✅ Cancelled afking.", ephemeral=True)
 
+    # 🎯 先明確檢查 bot 對這個頻道有沒有 Connect 權限，權限不夠直接給明確訊息，不用等連線失敗才知道
+    perms = channel.permissions_for(interaction.guild.me)
+    if not perms.connect:
+        conn.close()
+        return await interaction.followup.send(f"❌ I don't have **Connect** permission in {channel.mention}. Please check the channel's permission overwrites for my role.", ephemeral=True)
+
     existing_vc = discord.utils.get(bot.voice_clients, guild=interaction.guild)
     active_count = len([vc for vc in bot.voice_clients if vc.is_connected()])
 
     if not existing_vc and active_count >= MAX_VOICE_WATCH:
         conn.close()
-        return await interaction.followup.send(f"❌ Maximum number of channels available for AFK ({MAX_VOICE_WATCH} channels), use `/setvoice` to cancel some channels and try again later", ephemeral=True)
+        return await interaction.followup.send(f"❌ Maximum number of channels available for AFK ({MAX_VOICE_WATCH} channels), use `/afkvoice` to cancel some channels and try again later", ephemeral=True)
 
     try:
         if existing_vc:
             await asyncio.wait_for(existing_vc.move_to(channel), timeout=15)
         else:
             await asyncio.wait_for(channel.connect(self_mute=True, self_deaf=True, timeout=15), timeout=20)
-    except (discord.ClientException, asyncio.TimeoutError) as e:
+    except asyncio.TimeoutError:
         conn.close()
-        # 🎯 強制清掉卡住的殘留連線，避免下次指令又卡住
         stuck_vc = discord.utils.get(bot.voice_clients, guild=interaction.guild)
         if stuck_vc:
             try: await stuck_vc.disconnect(force=True)
             except: pass
-        return await interaction.followup.send("❌ Voice connect timed out. This is very likely a network restriction on the hosting platform (Railway often blocks the outbound UDP traffic that Discord voice needs), not a bug in the bot itself. And if u wnat me transfer to other host platform, contect the developer and give him some money.", ephemeral=True)
+        logger.error(f"[/afkvoice] 連線逾時：guild={interaction.guild_id}, channel={channel.id}")
+        return await interaction.followup.send("❌ Voice connect timed out (20s). Cleared the stuck connection, please try again. If this keeps happening, screenshot this and send it to the developer.", ephemeral=True)
+    except discord.Forbidden as e:
+        conn.close()
+        logger.error(f"[/afkvoice] Forbidden: {e}")
+        return await interaction.followup.send(f"❌ Missing permission to join/speak in this channel: {e}", ephemeral=True)
+    except discord.ClientException as e:
+        conn.close()
+        logger.error(f"[/afkvoice] ClientException: {e}")
+        return await interaction.followup.send(f"❌ Voice client error: {e}", ephemeral=True)
+    except Exception as e:
+        conn.close()
+        logger.error(f"[/afkvoice] 未預期錯誤: {type(e).__name__}: {e}")
+        return await interaction.followup.send(f"❌ Unexpected error: {type(e).__name__}: {e}", ephemeral=True)
 
     cursor.execute("INSERT OR REPLACE INTO voice_watch (guild_id, channel_id) VALUES (?, ?)", (gid, str(channel.id)))
     conn.commit(); conn.close()
@@ -2079,8 +2106,8 @@ async def setvoice(interaction: discord.Interaction, channel: Optional[discord.V
     embed.set_footer(text=f"{interaction.guild.name}｜67")
     await interaction.followup.send(embed=embed)
 
-@setvoice.error
-async def setvoice_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+@afkvoice.error
+async def afkvoice_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.errors.MissingPermissions):
         await interaction.response.send_message("❌ Bro don't have the permission to do that.", ephemeral=True)
 
