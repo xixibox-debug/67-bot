@@ -53,7 +53,32 @@ ai_cooldowns = {}
 
 # 🎯 語音時數追蹤：(guild_id, user_id) -> 進入監聽頻道的時間戳
 voice_sessions = {}
-MAX_VOICE_WATCH = 5  # 全機器人同時間最多監聽 5 個語音頻道
+MAX_VOICE_WATCH = 20  # 全機器人同時間最多監聽 5 個語音頻道
+voice_keepalive_tasks = {}  # 🎯 guild_id -> asyncio.Task，避免語音連線因為完全沒有音訊流量被 Discord 判定閒置斷線
+
+
+async def start_voice_keepalive(guild_id: int, voice_client: discord.VoiceClient):
+    """啟動（或重啟）指定伺服器的語音保活任務"""
+    stop_voice_keepalive(guild_id)  # 先確保沒有殘留的舊任務
+
+    async def _loop():
+        try:
+            while voice_client.is_connected():
+                voice_client.send_audio_packet(b'\xF8\xFF\xFE', encode=False)
+                await asyncio.sleep(15)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"[語音保活錯誤] guild={guild_id}: {e}")
+
+    voice_keepalive_tasks[guild_id] = asyncio.create_task(_loop())
+
+
+def stop_voice_keepalive(guild_id: int):
+    """停止指定伺服器的語音保活任務"""
+    task = voice_keepalive_tasks.pop(guild_id, None)
+    if task and not task.done():
+        task.cancel()
 
 # =================================================================
 # 🗄️ 2. DATABASE INITIALIZATION (資料庫初始化)
@@ -2098,6 +2123,7 @@ async def afkvoice(interaction: discord.Interaction, channel: Optional[discord.V
     if channel is None:
         vc = discord.utils.get(bot.voice_clients, guild=interaction.guild)
         if vc: await vc.disconnect(force=True)
+        stop_voice_keepalive(interaction.guild_id)  # 🎯 取消時順便停掉保活任務
         cursor.execute("DELETE FROM voice_watch WHERE guild_id = ?", (gid,))
         conn.commit(); conn.close()
         return await interaction.followup.send("✅ Cancelled afking.", ephemeral=True)
@@ -2143,6 +2169,11 @@ async def afkvoice(interaction: discord.Interaction, channel: Optional[discord.V
 
     cursor.execute("INSERT OR REPLACE INTO voice_watch (guild_id, channel_id) VALUES (?, ?)", (gid, str(channel.id)))
     conn.commit(); conn.close()
+
+    # 🎯 連線成功，啟動保活任務避免之後被 Discord 判定閒置斷線
+    active_vc = discord.utils.get(bot.voice_clients, guild=interaction.guild)
+    if active_vc:
+        await start_voice_keepalive(interaction.guild_id, active_vc)
 
     now = datetime.datetime.now().timestamp()
     for member in channel.members:
@@ -2282,7 +2313,8 @@ async def on_ready():
         channel = guild.get_channel(int(cid)) if guild else None
         if channel:
             try:
-                await channel.connect(self_mute=True, self_deaf=True)
+                vc = await channel.connect(self_mute=True, self_deaf=True)
+                await start_voice_keepalive(int(gid), vc)  # 🎯 重連後也要啟動保活
                 now = datetime.datetime.now().timestamp()
                 for m in channel.members:
                     if not m.bot:
@@ -2651,7 +2683,7 @@ async def on_message(message: discord.Message):
                 used_provider = None  # 💡 用於追蹤是哪一個模型成功回應
                 
                 if os.getenv("GEMINI_API_KEY") and not ai_reply:
-                    gemini_models = ["gemini-3.5-flash", "gemini-3-flash", "gemini-2.5-flash", "gemini-3.1-flash-lite"]
+                    gemini_models = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3-flash", "gemini-2.5-flash", "gmeini-3.5-flash-lite", "gemini-3.1-flash-lite"]
                     for model_name in gemini_models:
                         try:
                             logger.info(f"🤖 優先請求直連 Gemini API ({model_name})...")
@@ -2664,9 +2696,9 @@ async def on_message(message: discord.Message):
                             if ai_reply:
                                 logger.info(f"✨ [第一防線] 直連 Gemini ({model_name}) 成功救援故事！")
                                 # 💡 根據成功回應的模型決定標記
-                                if model_name in ["gemini-3.5-flash", "gemini-3-flash", "gemini-2.5-flash"]:
+                                if model_name in ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3-flash", "gemini-2.5-flash"]:
                                     used_provider = "gemini_loop"
-                                elif model_name == "gemini-3.1-flash-lite":
+                                elif model_name in ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]:
                                     used_provider = "gemini_lite"
                                 break  # 成功取得回應，跳出 Gemini 輪詢
                         except Exception as gemini_err:
@@ -2701,9 +2733,9 @@ async def on_message(message: discord.Message):
                     
                 # 🎯 根據成功的來源追加對應的新版格式浮水印
                 if used_provider == "gemini_loop":
-                    watermark = "\n\n-# **67+AI (2.5 loop)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
+                    watermark = "\n\n-# **67+AI (2.7 loop)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
                 elif used_provider == "gemini_lite":
-                    watermark = "\n\n-# **67+AI (2a)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
+                    watermark = "\n\n-# **67+AI (2.5a)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
                 elif used_provider == "groq":
                     watermark = "\n\n-# **67+AI (1)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
                 else:
