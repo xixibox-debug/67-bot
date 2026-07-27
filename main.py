@@ -343,7 +343,7 @@ async def apply_streak_nickname(member: discord.Member, cur_streak: int):
 
     threshold, emoji = row
     base_name = _strip_streak_suffix(member.display_name, emoji)
-    new_nick = f"{base_name} [{emoji}]{cur_streak}"
+    new_nick = f"{base_name} {emoji}{cur_streak}"
 
     # Discord 暱稱上限 32 字，超過的話從原本名稱那段截短，確保後面的 [符號]天數 一定完整保留
     if len(new_nick) > 32:
