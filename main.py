@@ -327,30 +327,49 @@ async def revoke_streak_roles(member: discord.Member, up_to_streak: int):
                 logger.error(f"nah, I can't remove **{role.name}** from **{member.name}**")
 
 
+def _strip_streak_suffix(nickname: str, emoji: str) -> str:
+    """把暱稱結尾的「 [符號]天數」格式去掉，回傳乾淨的原始名稱"""
+    pattern = r"\s*\[" + re.escape(emoji) + r"\]\d+$"
+    return re.sub(pattern, "", nickname)
+
+
 async def apply_streak_nickname(member: discord.Member, cur_streak: int):
+    """格式：{原本名稱} [符號]{天數}，天數每次連擊增加都要更新，不是只設定一次"""
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
     cursor.execute("SELECT nick_threshold, nick_emoji FROM streaks_settings WHERE guild_id = ?", (str(member.guild.id),))
     row = cursor.fetchone(); conn.close()
-    if not row or not row[1] or cur_streak < row[0]: return
-    prefix = f"{row[1]} "
-    current_nick = member.display_name
-    if not current_nick.startswith(prefix):
+    if not row or not row[1] or cur_streak < row[0]:
+        return
+
+    threshold, emoji = row
+    base_name = _strip_streak_suffix(member.display_name, emoji)
+    new_nick = f"{base_name} [{emoji}]{cur_streak}"
+
+    # Discord 暱稱上限 32 字，超過的話從原本名稱那段截短，確保後面的 [符號]天數 一定完整保留
+    if len(new_nick) > 32:
+        overflow = len(new_nick) - 32
+        base_name = base_name[:max(0, len(base_name) - overflow)]
+        new_nick = f"{base_name} [{emoji}]{cur_streak}"
+
+    if member.display_name != new_nick:
         try:
-            await member.edit(nick=(prefix + current_nick)[:32])
+            await member.edit(nick=new_nick)
         except discord.Forbidden:
             pass
 
 
 async def revert_streak_nickname(member: discord.Member):
+    """連擊斷掉時自動偵測並還原成原本的名稱"""
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
     cursor.execute("SELECT nick_emoji FROM streaks_settings WHERE guild_id = ?", (str(member.guild.id),))
     row = cursor.fetchone(); conn.close()
-    if not row or not row[0]: return
-    prefix = f"{row[0]} "
-    current_nick = member.display_name
-    if current_nick.startswith(prefix):
+    if not row or not row[0]:
+        return
+
+    base_name = _strip_streak_suffix(member.display_name, row[0])
+    if base_name != member.display_name:
         try:
-            await member.edit(nick=current_nick[len(prefix):] or None)
+            await member.edit(nick=base_name or None)
         except discord.Forbidden:
             pass
 
@@ -438,7 +457,6 @@ class SixSevenBot(commands.Bot):
     async def setup_hook(self):
         self.rotate_status.start()
         self.check_time_announcements.start()
-        self.add_view(OrderActionView())
         await self.tree.sync()
 
     @tasks.loop(seconds=60)
@@ -1258,142 +1276,6 @@ class SettingsView(ui.View):
         await interaction.response.edit_message(view=self)
 
 # =================================================================
-# 🛒 OSLF飛機銷售專用
-# =================================================================
-
-# 限定目標伺服器 ID 與論壇頻道 ID
-TARGET_GUILD_ID = 1458114486442524904
-TARGET_FORUM_ID = 1496743164713766952
-
-# 標籤對應訊息設定 (Tag ID : 發送內容)
-TAG_CONFIG = {
-    1496744588751274057:
-        "Pls check the latest delivery time at"
-        " https://discord.com/channels/1458114486442524904/1520931414953168997"
-        " first.\n\n<@&1505934626202452079>，有人要買飛機啦",
-    1496883730068013247:
-        "<@936410788242001970>，有人要賣飛機啦",
-    1496883628523917464:
-        "<@&1513789778225659904>, do you guys want to help?",
-}
-
-EXTRA_INSTRUCTIONS = (
-    "\n\n- 如果您願意協助銷售/代銷，請按下`接手` If you are willing to assist with"
-    " sales/reselling, please press `Take Over`.\n- 如果訂單已完成，請按下`已完成`"
-    " If the order is completed, please press `Completed`."
-)
-
-
-class OrderActionView(ui.View):
-
-  def __init__(self):
-    super().__init__(timeout=None)  # timeout=None 保持按鈕長效持久化
-
-  @ui.button(
-      label="接手 Take Over",
-      style=discord.ButtonStyle.primary,
-      custom_id="order_system:takeover",
-  )
-  async def takeover_button(
-      self, interaction: discord.Interaction, button: ui.Button
-  ):
-    # 限制 1：非指定伺服器不執行
-    if interaction.guild_id != TARGET_GUILD_ID:
-      return await interaction.response.send_message(
-          "❌ Only for selected server.", ephemeral=True
-      )
-
-    # 限制 2：已結案則不允許接手
-    if "【🟢 狀態/Status：已完成 Completed】" in interaction.message.content:
-      return await interaction.response.send_message(
-          "❌ 此訂單已經完成過了。 This order has completed.", ephemeral=True
-      )
-
-    # 限制 3：若內文已有接手人，顯示錯誤並防止重複點擊
-    if "👉 **接手人 Taken over by：**" in interaction.message.content:
-      return await interaction.response.send_message(
-          "❌ 此訂單已被接手，無法重複接手。 This order has been taken over.", ephemeral=True
-      )
-
-    user_mention = interaction.user.mention
-    current_content = interaction.message.content
-
-    # 1. 紀錄接手者
-    new_content = current_content + f"\n\n👉 **接手人 Taken over by：** {user_mention}"
-
-    # 🎯 2. 按下接手後，將「接手」按鈕本身關閉 (Disabled) 並變更為灰色
-    button.disabled = True
-    button.style = discord.ButtonStyle.secondary
-
-    # 3. 編輯訊息更新內文與按鈕狀態
-    await interaction.response.edit_message(content=new_content, view=self)
-    await interaction.followup.send(
-        f"✅ {user_mention} 已接手此訂單！ {user_mention} has taken over this order!", ephemeral=False
-    )
-
-  @ui.button(
-      label="已完成 Completed",
-      style=discord.ButtonStyle.success,
-      custom_id="order_system:complete",
-  )
-  async def complete_button(
-      self, interaction: discord.Interaction, button: ui.Button
-  ):
-    # 限制 1：非指定伺服器不執行
-    if interaction.guild_id != TARGET_GUILD_ID:
-      return await interaction.response.send_message(
-          "❌ Only for selected server.", ephemeral=True
-      )
-
-    # 限制 2：防呆避免重複點擊
-    if "【🟢 狀態/Status：已完成 Completed】" in interaction.message.content:
-      return await interaction.response.send_message(
-          "❌ 此訂單已經完成過了。 This order has completed.", ephemeral=True
-      )
-
-    current_content = interaction.message.content
-
-    # 1. 替換/標記結案狀態
-    if "訊息已接收" in current_content:
-      new_content = current_content.replace(
-          "訊息已接收", "【🟢 狀態/Status：已完成 Completed】"
-      )
-    else:
-      new_content = current_content + "\n\n【🟢 狀態/Status：已完成 Completed】"
-
-    # 🎯 2. 將此 View 下的所有按鈕全部停用 (Disabled)
-    for child in self.children:
-      if isinstance(child, ui.Button):
-        child.disabled = True
-        # 如果是完成按鈕，將顏色改為灰色
-        if child.custom_id == "order_system:complete":
-          child.style = discord.ButtonStyle.secondary
-
-    # 3. 編輯訊息與回應
-    await interaction.response.edit_message(content=new_content, view=self)
-    await interaction.followup.send(
-        "✅ 訂單已完成，貼文已鎖定並關閉。 This order has been completed, post locked."
-    )
-
-    # 4. 鎖定 (Lock) 並關閉/歸檔 (Archive) 討論串/論壇貼文
-    if isinstance(interaction.channel, discord.Thread):
-      thread = interaction.channel
-      new_name = (
-          thread.name
-          if thread.name.startswith("[Complete]")
-          else f"[Complete] {thread.name}"
-      )
-      try:
-        # locked=True (鎖定), archived=True (關閉貼文)
-        await thread.edit(name=new_name, locked=True, archived=True)
-      except discord.Forbidden:
-        logger.error(
-            "nah, I don't have permission to lock or close this thread."
-        )
-      except Exception as e:
-        logger.error(f"[OrderComplete Error]: {e}")
-
-# =================================================================
 # 🚀 6. SLASH COMMANDS
 # =================================================================
 
@@ -2193,6 +2075,74 @@ async def afkvoice_error(interaction: discord.Interaction, error: app_commands.A
     if isinstance(error, app_commands.errors.MissingPermissions):
         await interaction.response.send_message("❌ Bro don't have the permission to do that.", ephemeral=True)
 
+# 🎯 音檔路徑：跟 main.py 放在同一層目錄，檔名自己換成你實際上傳的檔名
+NGGYU_FILE = "nggyu.mp3"
+
+@bot.tree.command(name="nggyu", description="Play Never Gonna Give You Up once in a voice channel")
+@app_commands.describe(channel="Voice channel to rickroll")
+@app_commands.checks.has_permissions(administrator=True)
+async def nggyu(interaction: discord.Interaction, channel: discord.VoiceChannel):
+    await interaction.response.defer()
+
+    if not os.path.exists(NGGYU_FILE):
+        return await interaction.followup.send(f"❌ 找不到音檔：`{NGGYU_FILE}`，請確認檔案有跟 main.py 放在同一層目錄。", ephemeral=True)
+
+    perms = channel.permissions_for(interaction.guild.me)
+    if not perms.connect or not perms.speak:
+        return await interaction.followup.send(f"❌ I don't have Connect/Speak permission in {channel.mention}.", ephemeral=True)
+
+    existing_vc = discord.utils.get(bot.voice_clients, guild=interaction.guild)
+    original_channel = None  # 🎯 如果 bot 原本就用 /afkvoice 掛在別的頻道，播完要切回去
+
+    try:
+        if existing_vc:
+            if existing_vc.channel.id != channel.id:
+                original_channel = existing_vc.channel
+                stop_voice_keepalive(interaction.guild_id)
+                await asyncio.wait_for(existing_vc.move_to(channel), timeout=15)
+            vc = existing_vc
+        else:
+            active_count = len([v for v in bot.voice_clients if v.is_connected()])
+            if active_count >= MAX_VOICE_WATCH:
+                return await interaction.followup.send(f"❌ 目前已達語音連線上限（{MAX_VOICE_WATCH} 個），請稍後再試。", ephemeral=True)
+            vc = await asyncio.wait_for(channel.connect(self_deaf=True, timeout=15), timeout=20)
+    except Exception as e:
+        return await interaction.followup.send(f"❌ Failed to join voice channel: {type(e).__name__}: {e}", ephemeral=True)
+
+    if vc.is_playing():
+        vc.stop()
+
+    finished = asyncio.Event()
+
+    def _after_play(error):
+        if error:
+            logger.error(f"[/nggyu 播放錯誤]: {error}")
+        bot.loop.call_soon_threadsafe(finished.set)
+
+    try:
+        vc.play(discord.FFmpegPCMAudio(NGGYU_FILE), after=_after_play)
+    except Exception as e:
+        return await interaction.followup.send(f"❌ Failed to play audio: {type(e).__name__}: {e}", ephemeral=True)
+
+    await interaction.followup.send(f"📀 Never gonna give you up~ playing in {channel.mention}")
+    await finished.wait()
+
+    # 🎯 播完：如果原本是 /afkvoice 常駐狀態，切回原頻道恢復保活；不然就離開
+    if original_channel:
+        try:
+            await asyncio.wait_for(vc.move_to(original_channel), timeout=15)
+            await start_voice_keepalive(interaction.guild_id, vc)
+        except Exception as e:
+            logger.error(f"[/nggyu 切回原頻道失敗]: {e}")
+    elif not existing_vc:
+        await vc.disconnect(force=True)
+
+
+@nggyu.error
+async def nggyu_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.errors.MissingPermissions):
+        await interaction.response.send_message("❌ Bro don't have the permission to do that.", ephemeral=True)
+
 @bot.tree.command(name="addrole", description="Manually add a role to a user")
 @app_commands.checks.has_permissions(administrator=True)
 async def addrole(interaction: discord.Interaction, user: discord.Member, role: discord.Role):
@@ -2904,13 +2854,7 @@ async def on_message(message: discord.Message):
                 try:
                     notify_channel = message.guild.get_channel(int(s_channel_id)) or await message.guild.fetch_channel(int(s_channel_id))
                     if notify_channel:
-                        s_embed = discord.Embed(
-                            title="🔥 Streak!",
-                            color=0xff6600,
-                            description=f"{message.author.mention} reached a **{cur_streak}**-day streak!"
-                        )
-                        s_embed.set_footer(text=f"{message.guild.name}｜67")
-                        await notify_channel.send(embed=s_embed)
+                        await notify_channel.send(f"{message.author.mention}, Streaks UP! {cur_streak}days")
                 except Exception as e:
                     logger.error(f"[Streak 通知發送失敗]: {e}")
 
@@ -3000,27 +2944,6 @@ async def streaks(interaction: discord.Interaction, user: Optional[discord.Membe
     view = StreaksBoardView(target, interaction.guild)
     embed = view.build_personal_embed()
     await interaction.response.send_message(embed=embed, view=view)
-
-@bot.event
-async def on_thread_create(thread: discord.Thread):
-  """當論壇有新貼文建立時觸發"""
-  # 判定：必須在伺服器 1458114486442524904 且頻道為目標論壇時才觸發
-  if thread.guild.id != TARGET_GUILD_ID or thread.parent_id != TARGET_FORUM_ID:
-    return
-
-  # 取得貼文標籤 IDs
-  applied_tag_ids = [tag.id for tag in thread.applied_tags]
-
-  msg_to_send = ""
-  for tag_id in applied_tag_ids:
-    if tag_id in TAG_CONFIG:
-      msg_to_send = TAG_CONFIG[tag_id]
-      break  # 匹配到第一個目標標籤即跳出
-
-  if msg_to_send:
-    full_content = msg_to_send + EXTRA_INSTRUCTIONS
-    # 發送訊息與接手/完成按鈕
-    await thread.send(content=full_content, view=OrderActionView())
     
 # =================================================================
 # 🔑 8. RUN BOT
