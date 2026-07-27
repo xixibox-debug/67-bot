@@ -2854,7 +2854,7 @@ async def on_message(message: discord.Message):
                 try:
                     notify_channel = message.guild.get_channel(int(s_channel_id)) or await message.guild.fetch_channel(int(s_channel_id))
                     if notify_channel:
-                        await notify_channel.send(f"{message.author.mention}, Streaks UP! {cur_streak}days")
+                        await notify_channel.send(f"{message.author.mention}, Streak up! 🔥{cur_streak}")
                 except Exception as e:
                     logger.error(f"[Streak 通知發送失敗]: {e}")
 
