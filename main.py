@@ -349,7 +349,7 @@ async def apply_streak_nickname(member: discord.Member, cur_streak: int):
     if len(new_nick) > 32:
         overflow = len(new_nick) - 32
         base_name = base_name[:max(0, len(base_name) - overflow)]
-        new_nick = f"{base_name} [{emoji}]{cur_streak}"
+        new_nick = f"{base_name} {emoji}{cur_streak}"
 
     if member.display_name != new_nick:
         try:
