@@ -328,8 +328,8 @@ async def revoke_streak_roles(member: discord.Member, up_to_streak: int):
 
 
 def _strip_streak_suffix(nickname: str, emoji: str) -> str:
-    """把暱稱結尾的「 [符號]天數」格式去掉，回傳乾淨的原始名稱"""
-    pattern = r"\s*\[" + re.escape(emoji) + r"\]\d+$"
+    """把暱稱結尾的「 符號天數」格式去掉，回傳乾淨的原始名稱"""
+    pattern = r"\s*" + re.escape(emoji) + r"\d+$"
     return re.sub(pattern, "", nickname)
 
 
@@ -345,12 +345,12 @@ async def apply_streak_nickname(member: discord.Member, cur_streak: int):
     base_name = _strip_streak_suffix(member.display_name, emoji)
     new_nick = f"{base_name} {emoji}{cur_streak}"
 
-    # Discord 暱稱上限 32 字，超過的話從原本名稱那段截短，確保後面的 [符號]天數 一定完整保留
+    # Discord 暱稱上限 32 字，超過的話從原本名稱那段截短，確保後面的 符號天數 一定完整保留
     if len(new_nick) > 32:
         overflow = len(new_nick) - 32
         base_name = base_name[:max(0, len(base_name) - overflow)]
         new_nick = f"{base_name} {emoji}{cur_streak}"
-
+        
     if member.display_name != new_nick:
         try:
             await member.edit(nick=new_nick)
@@ -457,8 +457,9 @@ class SixSevenBot(commands.Bot):
     async def setup_hook(self):
         self.rotate_status.start()
         self.check_time_announcements.start()
+        self.add_view(MusicControlView())  # 🎯 讓控制面板按鈕重啟後依然有效
         await self.tree.sync()
-
+        
     @tasks.loop(seconds=60)
     async def rotate_status(self):
         await self.wait_until_ready()  # 🎯 加上這一行：等待機器人完全準備好
@@ -2142,6 +2143,310 @@ async def nggyu(interaction: discord.Interaction, channel: discord.VoiceChannel)
 async def nggyu_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.errors.MissingPermissions):
         await interaction.response.send_message("❌ Bro don't have the permission to do that.", ephemeral=True)
+
+# =================================================================
+# 🎵 點歌系統
+# =================================================================
+import yt_dlp
+
+YTDLP_OPTS = {
+    "format": "bestaudio/best",
+    "noplaylist": True,
+    "quiet": True,
+    "no_warnings": True,
+    "default_search": "ytsearch1",
+    "source_address": "0.0.0.0",
+}
+
+FFMPEG_OPTS = {
+    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+    "options": "-vn",
+}
+
+
+def _ytdlp_extract(query: str) -> dict:
+    with yt_dlp.YoutubeDL(YTDLP_OPTS) as ydl:
+        info = ydl.extract_info(query, download=False)
+        if "entries" in info:
+            info = info["entries"][0]
+        return {
+            "title": info.get("title", "Unknown"),
+            "url": info.get("url"),
+            "webpage_url": info.get("webpage_url"),
+            "duration": info.get("duration", 0),
+            "thumbnail": info.get("thumbnail"),
+        }
+
+
+async def ytdlp_extract(query: str) -> dict:
+    # 🎯 yt-dlp 的 extract_info 是阻塞式的，丟到另一個執行緒跑，避免卡住整個 bot 的事件迴圈
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _ytdlp_extract, query)
+
+
+class GuildMusicState:
+    def __init__(self, guild_id: int):
+        self.guild_id = guild_id
+        self.queue = []
+        self.current = None
+        self.voice_client = None
+        self.panel_message = None
+        self.panel_channel_id = None
+        self.is_paused = False
+        self.was_afk_channel = None  # 🎯 播放前如果 /afkvoice 正掛在別的頻道，記住它，播完切回去
+
+
+music_states = {}  # guild_id -> GuildMusicState
+
+def get_music_state(guild_id: int) -> GuildMusicState:
+    if guild_id not in music_states:
+        music_states[guild_id] = GuildMusicState(guild_id)
+    return music_states[guild_id]
+
+
+class MusicControlView(ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @ui.button(label="⏯️ Pause/Resume", style=discord.ButtonStyle.primary, custom_id="music:pauseresume")
+    async def pause_resume(self, interaction: discord.Interaction, button: ui.Button):
+        state = music_states.get(interaction.guild_id)
+        if not state or not state.voice_client:
+            return await interaction.response.send_message("❌ Nothing is playing.", ephemeral=True)
+        if state.voice_client.is_playing():
+            state.voice_client.pause()
+            state.is_paused = True
+        elif state.voice_client.is_paused():
+            state.voice_client.resume()
+            state.is_paused = False
+        await interaction.response.defer()
+        await update_music_panel(interaction.guild_id)
+
+    @ui.button(label="⏭️ Skip", style=discord.ButtonStyle.secondary, custom_id="music:skip")
+    async def skip(self, interaction: discord.Interaction, button: ui.Button):
+        state = music_states.get(interaction.guild_id)
+        if not state or not state.voice_client or not (state.voice_client.is_playing() or state.voice_client.is_paused()):
+            return await interaction.response.send_message("❌ Nothing is playing.", ephemeral=True)
+        state.voice_client.stop()  # 觸發 after callback，自動播下一首
+        await interaction.response.send_message("⏭️ Skipped.", ephemeral=True)
+
+    @ui.button(label="⏹️ Stop", style=discord.ButtonStyle.danger, custom_id="music:stop")
+    async def stop_button(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.defer()
+        await stop_music(interaction.guild_id)
+
+    @ui.button(label="📃 Queue", style=discord.ButtonStyle.secondary, custom_id="music:queue")
+    async def show_queue(self, interaction: discord.Interaction, button: ui.Button):
+        state = music_states.get(interaction.guild_id)
+        if not state or not state.queue:
+            return await interaction.response.send_message("📃 Queue is empty.", ephemeral=True)
+        lines = [f"{i + 1}. {s['title']}" for i, s in enumerate(state.queue[:10])]
+        await interaction.response.send_message("**Up Next:**\n" + "\n".join(lines), ephemeral=True)
+
+
+async def update_music_panel(guild_id: int, ended: bool = False):
+    state = music_states.get(guild_id)
+    if not state or not state.panel_channel_id:
+        return
+    channel = bot.get_channel(int(state.panel_channel_id))
+    if not channel:
+        return
+
+    if ended or not state.current:
+        embed = discord.Embed(title="📻 Music Panel", description="Queue ended.", color=0x2b2d31)
+    else:
+        song = state.current
+        status = "⏸️ Paused" if state.is_paused else "▶️ Playing"
+        embed = discord.Embed(title="📻 Now Playing", color=0x1db954, description=f"**[{song['title']}]({song['webpage_url']})**\n{status}")
+        if song.get("thumbnail"):
+            embed.set_thumbnail(url=song["thumbnail"])
+        if state.queue:
+            upnext = "\n".join(f"{i + 1}. {s['title']}" for i, s in enumerate(state.queue[:5]))
+            embed.add_field(name="Up Next", value=upnext, inline=False)
+
+    view = MusicControlView()
+    try:
+        if state.panel_message:
+            await state.panel_message.edit(embed=embed, view=view)
+        else:
+            state.panel_message = await channel.send(embed=embed, view=view)
+    except discord.NotFound:
+        state.panel_message = await channel.send(embed=embed, view=view)
+    except Exception as e:
+        logger.error(f"[點歌面板更新失敗]: {e}")
+
+
+async def play_next(guild_id: int):
+    state = music_states.get(guild_id)
+    if not state:
+        return
+
+    if not state.queue:
+        state.current = None
+        await update_music_panel(guild_id, ended=True)
+        if state.voice_client:
+            if state.was_afk_channel:
+                try:
+                    await asyncio.wait_for(state.voice_client.move_to(state.was_afk_channel), timeout=15)
+                    await start_voice_keepalive(guild_id, state.voice_client)
+                except Exception as e:
+                    logger.error(f"[點歌] 切回 afk 頻道失敗: {e}")
+                    await state.voice_client.disconnect(force=True)
+                    state.voice_client = None
+            else:
+                await state.voice_client.disconnect(force=True)
+                state.voice_client = None
+        state.was_afk_channel = None
+        return
+
+    song = state.queue.pop(0)
+    state.current = song
+    state.is_paused = False
+
+    def _after(error):
+        if error:
+            logger.error(f"[點歌播放錯誤]: {error}")
+        asyncio.run_coroutine_threadsafe(play_next(guild_id), bot.loop)
+
+    try:
+        source = discord.FFmpegPCMAudio(song["url"], **FFMPEG_OPTS)
+        state.voice_client.play(source, after=_after)
+    except Exception as e:
+        logger.error(f"[點歌播放失敗]: {e}")
+        await play_next(guild_id)
+        return
+
+    await update_music_panel(guild_id)
+
+
+async def stop_music(guild_id: int):
+    state = music_states.get(guild_id)
+    if not state:
+        return
+    state.queue.clear()
+    if state.voice_client and (state.voice_client.is_playing() or state.voice_client.is_paused()):
+        state.voice_client.stop()  # 佇列已空，觸發 after -> play_next 會自動處理離開/切回 afk 頻道
+    else:
+        state.current = None
+        if state.voice_client:
+            if state.was_afk_channel:
+                try:
+                    await asyncio.wait_for(state.voice_client.move_to(state.was_afk_channel), timeout=15)
+                    await start_voice_keepalive(guild_id, state.voice_client)
+                except Exception as e:
+                    logger.error(f"[點歌] stop 後切回 afk 頻道失敗: {e}")
+            else:
+                await state.voice_client.disconnect(force=True)
+            state.voice_client = None
+        state.was_afk_channel = None
+        await update_music_panel(guild_id, ended=True)
+
+
+# ---------- Slash 指令 ----------
+
+@bot.tree.command(name="play", description="Play a song from YouTube in a voice channel")
+@app_commands.describe(query="Song name or YouTube link", channel="Voice channel (defaults to your current voice channel)")
+async def play(interaction: discord.Interaction, query: str, channel: Optional[discord.VoiceChannel] = None):
+    await interaction.response.defer()
+
+    target_channel = channel or (interaction.user.voice.channel if interaction.user.voice else None)
+    if not target_channel:
+        return await interaction.followup.send("❌ You're not in a voice channel, and no channel was specified.", ephemeral=True)
+
+    perms = target_channel.permissions_for(interaction.guild.me)
+    if not perms.connect or not perms.speak:
+        return await interaction.followup.send(f"❌ I don't have Connect/Speak permission in {target_channel.mention}.", ephemeral=True)
+
+    try:
+        song_info = await ytdlp_extract(query)
+    except Exception as e:
+        return await interaction.followup.send(f"❌ Couldn't find that song: {type(e).__name__}: {e}", ephemeral=True)
+
+    state = get_music_state(interaction.guild_id)
+    state.panel_channel_id = str(target_channel.id)  # 🎯 控制面板發在語音頻道自己的文字聊天室
+
+    existing_vc = discord.utils.get(bot.voice_clients, guild=interaction.guild)
+
+    if existing_vc:
+        if existing_vc.channel.id != target_channel.id:
+            conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+            cursor.execute("SELECT channel_id FROM voice_watch WHERE guild_id = ?", (str(interaction.guild_id),))
+            watch_row = cursor.fetchone(); conn.close()
+            if watch_row and int(watch_row[0]) == existing_vc.channel.id:
+                state.was_afk_channel = existing_vc.channel  # 🎯 記住原本 /afkvoice 掛的頻道
+            stop_voice_keepalive(interaction.guild_id)
+            try:
+                await asyncio.wait_for(existing_vc.move_to(target_channel), timeout=15)
+            except Exception as e:
+                return await interaction.followup.send(f"❌ Failed to move to voice channel: {e}", ephemeral=True)
+        state.voice_client = existing_vc
+    else:
+        active_count = len([v for v in bot.voice_clients if v.is_connected()])
+        if active_count >= MAX_VOICE_WATCH:
+            return await interaction.followup.send(f"❌ 目前已達語音連線上限（{MAX_VOICE_WATCH} 個），請稍後再試。", ephemeral=True)
+        try:
+            state.voice_client = await asyncio.wait_for(target_channel.connect(timeout=15), timeout=20)
+        except Exception as e:
+            return await interaction.followup.send(f"❌ Failed to join voice channel: {type(e).__name__}: {e}", ephemeral=True)
+
+    state.queue.append(song_info)
+    await interaction.followup.send(f"✅ Added **{song_info['title']}** to the queue.")
+
+    if not state.voice_client.is_playing() and not state.voice_client.is_paused():
+        await play_next(interaction.guild_id)
+    else:
+        await update_music_panel(interaction.guild_id)
+
+
+@bot.tree.command(name="skip", description="Skip the current song")
+async def skip_cmd(interaction: discord.Interaction):
+    state = music_states.get(interaction.guild_id)
+    if not state or not state.voice_client or not (state.voice_client.is_playing() or state.voice_client.is_paused()):
+        return await interaction.response.send_message("❌ Nothing is playing.", ephemeral=True)
+    state.voice_client.stop()
+    await interaction.response.send_message("⏭️ Skipped.")
+
+
+@bot.tree.command(name="pause", description="Pause the current song")
+async def pause_cmd(interaction: discord.Interaction):
+    state = music_states.get(interaction.guild_id)
+    if not state or not state.voice_client or not state.voice_client.is_playing():
+        return await interaction.response.send_message("❌ Nothing is playing.", ephemeral=True)
+    state.voice_client.pause()
+    state.is_paused = True
+    await update_music_panel(interaction.guild_id)
+    await interaction.response.send_message("⏸️ Paused.", ephemeral=True)
+
+
+@bot.tree.command(name="resume", description="Resume the current song")
+async def resume_cmd(interaction: discord.Interaction):
+    state = music_states.get(interaction.guild_id)
+    if not state or not state.voice_client or not state.voice_client.is_paused():
+        return await interaction.response.send_message("❌ Nothing is paused.", ephemeral=True)
+    state.voice_client.resume()
+    state.is_paused = False
+    await update_music_panel(interaction.guild_id)
+    await interaction.response.send_message("▶️ Resumed.", ephemeral=True)
+
+
+@bot.tree.command(name="stop", description="Stop playback and clear the queue")
+async def stop_cmd(interaction: discord.Interaction):
+    await interaction.response.defer()
+    await stop_music(interaction.guild_id)
+    await interaction.followup.send("⏹️ Stopped and cleared the queue.")
+
+
+@bot.tree.command(name="queue", description="Show the current song queue")
+async def queue_cmd(interaction: discord.Interaction):
+    state = music_states.get(interaction.guild_id)
+    if not state or (not state.current and not state.queue):
+        return await interaction.response.send_message("📃 Queue is empty.", ephemeral=True)
+    desc = ""
+    if state.current:
+        desc += f"**Now Playing:** {state.current['title']}\n\n"
+    desc += "\n".join(f"{i + 1}. {s['title']}" for i, s in enumerate(state.queue)) if state.queue else "*(no songs queued)*"
+    embed = discord.Embed(title="📃 Queue", description=desc, color=0x2b2d31)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="addrole", description="Manually add a role to a user")
 @app_commands.checks.has_permissions(administrator=True)
