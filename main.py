@@ -650,10 +650,16 @@ class WelcomeConfigView(ui.View):
             embed.description = (
                 f"Status: **on**\n"
                 f"Notification channel: {ch_text}\n\n"
-                f"**Welcome Embed title:** {w_t or 'Not set'}\n"
-                f"**Welcome Embed content:**\n{w_d or 'Not set'}\n\n"
-                f"**Goodbye Embed title:** {g_t or 'Not set'}\n"
-                f"**Goodbye Embed content:**\n{g_d or 'Not set'}"
+                f"**Welcome Embed title:**\n```\n{w_t or 'Not set'}\n```\n"
+                f"**Welcome Embed content:**\n```\n{w_d or 'Not set'}\n```\n"
+                f"**Goodbye Embed title:**\n```\n{g_t or 'Not set'}\n```\n"
+                f"**Goodbye Embed content:**\n```\n{g_d or 'Not set'}\n```\n\n"
+                f"📌 Supported dynamic parameter annotations (automatically replaced by the system when filling in):\n"
+                f"• {{user.name}} / {{user.username}} - Display member name\n"
+                f"• {{user.mention}} - Mention the member who joined the group\n"
+                f"• {{guild.name}} / {{server.name}} - Display the current server name\n"
+                f"• {{member.count}} / {{guild.members}} / {{guild.membercount}} - Total number of members\n"
+                f"• {{inviter.name}} / {{inviter}} - Inviter's name / Inviter's tag"
             )
         embed.set_footer(text=f"{guild.name}｜67")
         return embed
@@ -757,7 +763,12 @@ class LevelSettingsView(ui.View):
                 f"Status: **on**\n"
                 f"Notification channel: {dest_text}\n\n"
                 f"**Role award:**\n{roles_text}\n\n"
-                f"**Level up message:**\n{msg}"
+                f"**Level up message:**\n```\n{msg}\n```\n\n"
+                f"📌 Supported dynamic parameter annotations (automatically replaced by the system when filling in):\n"
+                f"• {{user.name}} / {{user.username}} - Display member name\n"
+                f"• {{user.mention}} - Mention the member who leveled up\n"
+                f"• {{guild.name}} / {{server.name}} - Display the current server name\n"
+                f"• {{level}} - The new level the member just reached"
             )
         embed.set_footer(text=f"{guild.name}｜67")
         return embed
@@ -918,7 +929,7 @@ class AutoMuteConfigView(ui.View):
             cursor.execute("SELECT banned_word, duration_str FROM mutes WHERE guild_id = ?", (str(self.guild_id),))
             words = cursor.fetchall(); conn.close()
             words_text = "\n".join(f"{w} → {d}" for w, d in words) if words else "Not set"
-            embed.description = f"Status: **on**\n\n**Banned word:**\n{words_text}"
+            embed.description = f"Status: **on**\n\n**Banned word:**\n```\n{words_text}\n```"
         embed.set_footer(text=f"{guild.name}｜67")
         return embed
 
@@ -1015,7 +1026,7 @@ class TimeMessageConfigView(ui.View):
                     short_msg = msg[:30] + "..." if len(msg) > 30 else msg
                     lines.append(f"{t_time} GMT {short_msg}")
             sched_text = "\n".join(lines) if lines else "Not set"
-            embed.description = f"Status: **on**\n\n**Now schedule:**\n{sched_text}"
+            embed.description = f"Status: **on**\n\n**Now schedule:**\n```\n{sched_text}\n```"
         embed.set_footer(text=f"{guild.name}｜67")
         return embed
 
@@ -1178,7 +1189,7 @@ class StreaksMainView(ui.View):
             embed.description = (
                 f"Status: **on**\n"
                 f"Daily streaks message: **{msgneeded}**\n"
-                f"Show emoji {nick_emoji} if streaks more than **{nick_threshold}** days\n"
+                f"Show emoji `{nick_emoji}` if streaks more than **{nick_threshold}** days\n"
                 f"Notification channel: {ch_text}"
             )
         embed.set_footer(text=f"{guild.name}｜67")
