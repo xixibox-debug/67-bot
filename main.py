@@ -2167,6 +2167,13 @@ YTDLP_OPTS = {
     "no_warnings": True,
     "default_search": "ytsearch1",
     "source_address": "0.0.0.0",
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["android", "web"],  # 🎯 偽裝成 Android App 用戶端，較少觸發反機器人驗證
+        }
+    },
+    # 🎯 有上傳 cookies.txt 才會用到，見下方說明
+    **({"cookiefile": "cookies.txt"} if os.path.exists("cookies.txt") else {}),
 }
 
 FFMPEG_OPTS = {
