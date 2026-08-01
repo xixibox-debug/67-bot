@@ -385,6 +385,30 @@ def build_week_line(day_status: str) -> str:
     status_line = "  ".join("✅" if c == "1" else "❌" for c in day_status)
     return f"```\n{day_line}\n{status_line}\n```"
 
+def recompute_current_week_status(gid: str, uid: str, streak: int):
+    """
+    根據 /setstreaks 設定後的 current_streak，往回推算「這一週」（週一到今天）
+    每一天是否該顯示 ✅，整段覆蓋寫入 streaks_weekly，灌水補上✅、砍掉的天數還原成❌。
+    """
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    tz = datetime.timezone(datetime.timedelta(hours=0))
+    today = datetime.datetime.now(tz)
+    week_start_str = get_week_start(today)
+    monday = today - datetime.timedelta(days=today.weekday())
+
+    days_this_week = (today - monday).days + 1  # 這週從週一到今天總共幾天
+    status = ["0"] * 7
+    for i in range(days_this_week):
+        day = monday + datetime.timedelta(days=i)
+        days_ago = (today - day).days
+        if days_ago < streak:  # 這天落在「往回數 streak 天」的範圍內
+            status[i] = "1"
+
+    cursor.execute(
+        "INSERT OR REPLACE INTO streaks_weekly (guild_id, user_id, week_start, day_status) VALUES (?, ?, ?, ?)",
+        (gid, uid, week_start_str, "".join(status))
+    )
+    conn.commit(); conn.close() 
 
 def parse_placeholders(text: str, member: discord.Member, guild: discord.Guild, inviter: discord.Member = None, extra: dict = None) -> str:
     if not text: return ""
@@ -416,6 +440,74 @@ def parse_mute_duration(duration_str: str):
     else: delta = datetime.timedelta(days=amount)
     if delta > datetime.timedelta(days=14): return None, "Max duration is 14 days."
     return delta, None
+
+AUTOMOD_RULE_PREFIX = "67bot-automute-"
+MAX_AUTOMOD_KEYWORD_RULES = 6
+
+
+async def sync_automod_rules(guild: discord.Guild) -> str | None:
+    """
+    把 mutes 表的違規字詞同步成 Discord 原生 AutoMod 規則。
+    同一個禁言時長的字詞會合併進同一條規則。回傳 None 代表成功，回傳字串代表錯誤訊息。
+    """
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("SELECT banned_word, duration_str FROM mutes WHERE guild_id = ?", (str(guild.id),))
+    rows = cursor.fetchall(); conn.close()
+
+    groups = {}
+    for word, dur in rows:
+        groups.setdefault(dur, []).append(word)
+
+    if len(groups) > MAX_AUTOMOD_KEYWORD_RULES:
+        return (f"❌ 目前有 **{len(groups)}** 種不同的禁言時長，但 Discord AutoMod 每個伺服器最多只能有 "
+                f"{MAX_AUTOMOD_KEYWORD_RULES} 條關鍵字規則。請把部分違規字詞改成相同時長，或減少種類。")
+
+    try:
+        existing_rules = await guild.fetch_automod_rules()
+    except discord.Forbidden:
+        return "❌ 我沒有 `Manage Server` 權限，無法建立/讀取 AutoMod 規則。請確認 bot 有這個權限（可能需要重新邀請機器人）。"
+
+    managed_rules = {r.name: r for r in existing_rules if r.name.startswith(AUTOMOD_RULE_PREFIX)}
+
+    for dur, words in groups.items():
+        rule_name = f"{AUTOMOD_RULE_PREFIX}{dur}"
+        delta, err = parse_mute_duration(dur)
+        if err or not delta:
+            continue
+
+        actions = [
+            discord.AutoModRuleAction(),                 # block_message：訊息直接被擋下，不會送出
+            discord.AutoModRuleAction(duration=delta),    # timeout：同時禁言
+        ]
+        trigger = discord.AutoModTrigger(keyword_filter=words)
+
+        try:
+            if rule_name in managed_rules:
+                await managed_rules[rule_name].edit(trigger=trigger, actions=actions, enabled=True, reason="67 Bot 自動同步違規字詞")
+            else:
+                await guild.create_automod_rule(
+                    name=rule_name,
+                    event_type=discord.AutoModRuleEventType.message_send,
+                    trigger=trigger,
+                    actions=actions,
+                    enabled=True,
+                    reason="67 Bot 自動同步違規字詞",
+                )
+        except discord.Forbidden:
+            return "❌ 我沒有 `Manage Server` / `Timeout Members` 權限，無法建立 AutoMod 規則。"
+        except Exception as e:
+            logger.error(f"[AutoMod 同步錯誤]: {e}")
+            return f"❌ 同步 AutoMod 規則時發生錯誤：{e}"
+
+    # 清掉已經沒有對應違規字詞的舊規則（例如某個時長的字全被移除了）
+    for name, rule in managed_rules.items():
+        if name not in [f"{AUTOMOD_RULE_PREFIX}{dur}" for dur in groups]:
+            try:
+                await rule.delete(reason="67 Bot 自動同步：已無對應違規字詞")
+            except Exception as e:
+                logger.error(f"[AutoMod 刪除規則錯誤]: {e}")
+
+    return None
 
 # =================================================================
 # 🤖 4. BOT CORE CLASS (機器人核心類別)
@@ -872,12 +964,19 @@ class AutoMuteModal(ui.Modal, title="Add Banned Word"):
         if self.word.value == "67": return await interaction.response.send_message("Cannot block '67'!", ephemeral=True)
         _, err = parse_mute_duration(self.time.value)
         if err: return await interaction.response.send_message(f"❌ {err}", ephemeral=True)
+
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
         cursor.execute("INSERT OR REPLACE INTO mutes VALUES (?, ?, ?)", (str(interaction.guild_id), self.word.value, self.time.value))
         conn.commit(); conn.close()
+
+        sync_err = await sync_automod_rules(interaction.guild)
+
         self.view.update_select_menu()
         await interaction.response.edit_message(embed=self.view.build_embed(interaction.guild), view=self.view)
-        await interaction.followup.send(f"🔒 Auto mute `{self.word.value}` added.", ephemeral=True)
+        if sync_err:
+            await interaction.followup.send(sync_err, ephemeral=True)
+        else:
+            await interaction.followup.send(f"🔒 Auto mute `{self.word.value}` added and synced to Discord AutoMod.", ephemeral=True)
 
 
 class BannedWordDeleteSelect(ui.Select):
@@ -888,9 +987,15 @@ class BannedWordDeleteSelect(ui.Select):
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
         cursor.execute("DELETE FROM mutes WHERE guild_id = ? AND banned_word = ?", (str(interaction.guild_id), word))
         conn.commit(); conn.close()
+
+        sync_err = await sync_automod_rules(interaction.guild)
+
         self.view.update_select_menu()
         await interaction.response.edit_message(embed=self.view.build_embed(interaction.guild), view=self.view)
-        await interaction.followup.send(f"✅ Removed Auto mute for: `{word}`", ephemeral=True)
+        if sync_err:
+            await interaction.followup.send(sync_err, ephemeral=True)
+        else:
+            await interaction.followup.send(f"✅ Removed Auto mute for: `{word}` and synced to Discord AutoMod.", ephemeral=True)
 
 
 class AutoMuteConfigView(ui.View):
@@ -943,6 +1048,20 @@ class AutoMuteConfigView(ui.View):
     async def toggle_enabled(self, interaction: discord.Interaction, button: ui.Button):
         cur = is_feature_enabled(self.guild_id, "automute")
         set_feature_enabled(self.guild_id, "automute", not cur)
+
+        if not cur:
+            # 剛從關閉切成開啟，重新同步規則
+            await sync_automod_rules(interaction.guild)
+        else:
+            # 剛從開啟切成關閉，停用我們管理的所有規則（不刪除，之後開啟可以馬上恢復）
+            try:
+                existing_rules = await interaction.guild.fetch_automod_rules()
+                for rule in existing_rules:
+                    if rule.name.startswith(AUTOMOD_RULE_PREFIX):
+                        await rule.edit(enabled=False, reason="67 Bot: Auto Mute 功能已關閉")
+            except Exception as e:
+                logger.error(f"[AutoMod 停用錯誤]: {e}")
+
         new_view = AutoMuteConfigView(interaction.guild_id)
         await interaction.response.edit_message(embed=new_view.build_embed(interaction.guild), view=new_view)
 
@@ -2497,6 +2616,9 @@ async def setstreaks(interaction: discord.Interaction, user: discord.Member, str
     
     gid = str(interaction.guild_id)
     uid = str(user.id)
+
+    tz = datetime.timezone(datetime.timedelta(hours=0))
+    today_str = datetime.datetime.now(tz).strftime("%Y-%m-%d")
     
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -2510,25 +2632,28 @@ async def setstreaks(interaction: discord.Interaction, user: discord.Member, str
         new_longest = max(old_longest, streaks)  # 如果新設定的天數大於歷史紀錄，就同步更新最長紀錄
         cursor.execute("""
             UPDATE streaks_data 
-            SET current_streak = ?, longest_streak = ? 
+            SET current_streak = ?, longest_streak = ?, last_streak_date = ?
             WHERE guild_id = ? AND user_id = ?
-        """, (streaks, new_longest, gid, uid))
+        """, (streaks, new_longest, today_str, gid, uid))
     else:
         # 若無歷史資料，則直接新增一筆
         cursor.execute("""
-            INSERT INTO streaks_data (guild_id, user_id, current_streak, longest_streak) 
-            VALUES (?, ?, ?, ?)
-        """, (gid, uid, streaks, streaks))
+            INSERT INTO streaks_data (guild_id, user_id, current_streak, longest_streak, last_streak_date) 
+            VALUES (?, ?, ?, ?, ?)
+        """, (gid, uid, streaks, streaks, today_str))
         
     conn.commit()
     conn.close()
+
+    # 🎯 同步更新這一週的簽到表格，灌水補✅、砍掉的天數還原❌
+    recompute_current_week_status(gid, uid, streaks)
     
     # 🎯 自動補強：手動調天數後，自動觸發機器人內建的「身分組發放」與「暱稱表情符號」檢查
     await check_streak_roles(user, streaks)
     await apply_streak_nickname(user, streaks)
     
     await interaction.response.send_message(f"🔥 Now {user.mention}'s Streaks had setted to **{streaks}** days!", ephemeral=True)
-
+    
 @bot.tree.command(name="addpaidserver", description="[Owner Only] Add a server to a paid feature's whitelist")
 @app_commands.describe(guild_id="The server ID that has paid", feature="The paid feature key, e.g. 67silent")
 async def addpaidserver(interaction: discord.Interaction, guild_id: str, feature: str = "67silent"):
@@ -3030,50 +3155,16 @@ async def on_message(message: discord.Message):
     if not message.guild:
         return
 
-# =================================================================
-    # 🔒 1. 自動禁言黑名單檢查（修復：刪除前發送通知、被禁言的人看得見時間）
+    # =================================================================
+    # 🔒 自動禁言已改用 Discord 原生 AutoMod 處理，訊息在送出前就會被擋下，
+    # 不需要再自己掃描 message.content，這裡直接建立資料庫連線給後面的區塊用
     # =================================================================
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
     gid = str(message.guild.id)
     uid = str(message.author.id)
-
-    if is_feature_enabled(gid, "automute"):
-        cursor.execute("SELECT banned_word, duration_str FROM mutes WHERE guild_id = ?", (gid,))
-        banned_list = cursor.fetchall()
-        for word, dur in banned_list:
-            if word in message.content:
-                try:
-                    # 🎯 修正點：在刪除原訊息前，先「私訊」給違規用戶，確保他絕對看得到自己被關多久、為什麼被關
-                    try:
-                        await message.author.send(
-                            f"⚠️ **Auto mute**\n"
-                            f"U sent `\"{word}\"` in **{message.guild.name}**\n"
-                            f"And u have been **Timeout** for** {dur}** by system.\n"
-                            f"ur original message: \n ```{message.content}```"
-                        )
-                    except discord.Forbidden:
-                        pass  # 對方若關閉陌生人私訊則略過，不讓程式崩潰
-
-                    # await message.delete()
-                    delta, _ = parse_mute_duration(dur)
-                    await message.author.timeout(delta or datetime.timedelta(minutes=10), reason="Auto Mute Triggered")
-                    
-                    # 🎯 修正點：公開頻道警示也改用 mention 標記，讓他事後看得到
-                    embed = discord.Embed(
-                        title="HAHAHA 🤣", 
-                        color=0xff0000, 
-                        description=f'{message.author.mention} has been muted for **{dur}** due to sending a blocked word, you can try and be the next!'
-                    )
-                    embed.set_footer(text=f"{message.guild.name}｜67")
-                    await message.reply(embed=embed, mention_author=False)
-                    conn.close()
-                    return 
-                except Exception as e:
-                    logger.error(f"[Auto Mute 錯誤]: {e}")
-                    pass
-
+    
     # =================================================================
     # 6️⃣7️⃣ 2. 檢查 "67" 關鍵字與次數統計（修復：排除網址）
     # =================================================================
