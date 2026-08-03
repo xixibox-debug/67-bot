@@ -1211,7 +1211,7 @@ class WarnModal(ui.Modal, title="Send a Warning"):
                 title="⚠️ Warn",
                 color=0xff8500,
                 description=(
-                    f"You have received a warn from {interaction.guild.name} by {interaction.user.name}\n"
+                    f"You have received a warn from `{interaction.guild.name}` by `{interaction.user.name}`\n"
                     f"Warn message:\n```\n{self.reason.value}\n```"
                 )
             )
@@ -2352,10 +2352,10 @@ YTDLP_OPTS = {
     "source_address": "0.0.0.0",
     "extractor_args": {
         "youtube": {
-            "player_client": ["android", "web"],  # 🎯 偽裝成 Android App 用戶端，較少觸發反機器人驗證
+            "player_client": ["android", "ios"],  # 🎯 拿掉 web（最近常被 YouTube 的 SABR 機制搞到格式抓不到）
+            "formats": ["missing_pot"],           # 🎯 允許使用缺少 PO Token 的格式，犧牲一點點畫質/穩定性換可用性
         }
     },
-    # 🎯 有上傳 cookies.txt 才會用到，見下方說明
     **({"cookiefile": "cookies.txt"} if os.path.exists("cookies.txt") else {}),
 }
 
