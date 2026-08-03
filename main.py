@@ -290,6 +290,12 @@ def is_autoreply_enabled(guild_id) -> bool:
     row = cursor.fetchone(); conn.close()
     return (row[0] == 1) if row else True  # 🎯 預設開啟
 
+def is_automute_delete_enabled(guild_id) -> bool:
+    """AutoMod 觸發時要不要連同封鎖訊息（block_message），預設開啟"""
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("SELECT enabled FROM feature_toggles WHERE guild_id = ? AND feature = ?", (str(guild_id), "automute_delete"))
+    row = cursor.fetchone(); conn.close()
+    return (row[0] == 1) if row else True
 
 def is_paid_guild(guild_id, feature: str) -> bool:
     """檢查這個伺服器是不是已經手動被加進某個付費功能的白名單"""
@@ -469,16 +475,18 @@ async def sync_automod_rules(guild: discord.Guild) -> str | None:
 
     managed_rules = {r.name: r for r in existing_rules if r.name.startswith(AUTOMOD_RULE_PREFIX)}
 
+    delete_msg = is_automute_delete_enabled(guild.id)
+
     for dur, words in groups.items():
         rule_name = f"{AUTOMOD_RULE_PREFIX}{dur}"
         delta, err = parse_mute_duration(dur)
         if err or not delta:
             continue
 
-        actions = [
-            discord.AutoModRuleAction(),                 # block_message：訊息直接被擋下，不會送出
-            discord.AutoModRuleAction(duration=delta),    # timeout：同時禁言
-        ]
+        actions = [discord.AutoModRuleAction(duration=delta)]  # timeout：一定要有
+        if delete_msg:
+            actions.insert(0, discord.AutoModRuleAction())     # block_message：訊息直接被擋下，不會送出
+
         trigger = discord.AutoModTrigger(keyword_filter=words)
 
         try:
@@ -1006,13 +1014,18 @@ class AutoMuteConfigView(ui.View):
         self.toggle_enabled.label = "✅ Status: On" if enabled else "❌ Status: Off"
         self.toggle_enabled.style = discord.ButtonStyle.success if enabled else discord.ButtonStyle.danger
 
+        delete_enabled = is_automute_delete_enabled(guild_id)
+        self.toggle_delete_msg.label = "✅ Delete Message: On" if delete_enabled else "❌ Delete Message: Off"
+        self.toggle_delete_msg.style = discord.ButtonStyle.success if delete_enabled else discord.ButtonStyle.secondary
+
         if enabled:
             self.select_menu = BannedWordDeleteSelect()
             self.add_item(self.select_menu)
             self.update_select_menu()
         else:
             self.remove_item(self.add_word)
-
+            self.remove_item(self.toggle_delete_msg)
+            
     def update_select_menu(self):
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
         cursor.execute("SELECT banned_word FROM mutes WHERE guild_id = ?", (str(self.guild_id),))
@@ -1034,7 +1047,8 @@ class AutoMuteConfigView(ui.View):
             cursor.execute("SELECT banned_word, duration_str FROM mutes WHERE guild_id = ?", (str(self.guild_id),))
             words = cursor.fetchall(); conn.close()
             words_text = "\n".join(f"{w} → {d}" for w, d in words) if words else "Not set"
-            embed.description = f"Status: **on**\n\n**Banned word:**\n```\n{words_text}\n```"
+            delete_status = "on" if is_automute_delete_enabled(self.guild_id) else "off"
+            embed.description = f"Status: **on**\nDelete message: **{delete_status}**\n\n**Banned word:**\n```\n{words_text}\n```"
         embed.set_footer(text=f"{guild.name}｜67")
         return embed
 
@@ -1067,6 +1081,14 @@ class AutoMuteConfigView(ui.View):
 
     @ui.button(label="➕ Add Banned Word", style=discord.ButtonStyle.success, row=0)
     async def add_word(self, interaction: discord.Interaction, button: ui.Button): await interaction.response.send_modal(AutoMuteModal(self))
+
+    @ui.button(label="✅ Delete Message: On", style=discord.ButtonStyle.success, row=1)
+    async def toggle_delete_msg(self, interaction: discord.Interaction, button: ui.Button):
+        cur = is_automute_delete_enabled(self.guild_id)
+        set_feature_enabled(self.guild_id, "automute_delete", not cur)
+        await sync_automod_rules(interaction.guild)  # 🎯 立刻重新同步，切換才會真的生效
+        new_view = AutoMuteConfigView(interaction.guild_id)
+        await interaction.response.edit_message(embed=new_view.build_embed(interaction.guild), view=new_view)
 
 class AnnouncementModal(ui.Modal, title="Add Time Message"):
     t_time = ui.TextInput(label="Time (HH:MM)", placeholder="08:00", max_length=5, required=True)
@@ -1165,15 +1187,57 @@ class TimeMessageConfigView(ui.View):
     @ui.button(label="⏰ Add Time Message", style=discord.ButtonStyle.success, row=0)
     async def add_time(self, interaction: discord.Interaction, button: ui.Button): await interaction.response.send_modal(AnnouncementModal(self))
 
+class WarnModal(ui.Modal, title="Send a Warning"):
+    reason = ui.TextInput(label="Warning message", style=discord.TextStyle.long, required=True, max_length=1000)
+
+    def __init__(self, target: discord.Member):
+        super().__init__()
+        self.target = target
+
+    async def on_submit(self, interaction: discord.Interaction):
+        channel_embed = discord.Embed(
+            title="⚠️ Warn",
+            color=0xff8500,
+            description=(
+                f"`{self.target.name}` got warned by `{interaction.user.name}`\n"
+                f"Warn message:\n```\n{self.reason.value}\n```"
+            )
+        )
+        channel_embed.set_footer(text=f"{interaction.guild.name}｜67")
+        await interaction.response.send_message(embed=channel_embed)
+
+        try:
+            dm_embed = discord.Embed(
+                title="⚠️ Warn",
+                color=0xff8500,
+                description=(
+                    f"You have received a warn from {interaction.guild.name} by {interaction.user.name}\n"
+                    f"Warn message:\n```\n{self.reason.value}\n```"
+                )
+            )
+            dm_embed.set_footer(text=f"{interaction.guild.name}")
+            dm_embed.timestamp = discord.utils.utcnow()  # 🎯 Discord 會自動換算成收訊者自己的當地時間顯示
+            await self.target.send(embed=dm_embed)
+        except discord.Forbidden:
+            pass  # 對方關閉私訊，公開頻道那則還是有發出去
+
+
+@bot.tree.command(name="warn", description="Warn a member (and sent via DM)")
+@app_commands.checks.has_permissions(moderate_members=True)
+@app_commands.describe(user="The member to warn")
+async def warn(interaction: discord.Interaction, user: discord.Member):
+    await interaction.response.send_modal(WarnModal(user))
+
+
+@warn.error
+async def warn_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.errors.MissingPermissions):
+        await interaction.response.send_message("❌ Bro don't have the permission to do that.", ephemeral=True)
+
+
 # =================================================================
 # 🔥 Streaks 系統 UI
 # =================================================================
-
-
-
-
-
-
 class StreaksNumberModal(ui.Modal, title="Set Daily Streaks Message Count"):
     value = ui.TextInput(label="Messages needed per day (1-999)", required=True, max_length=3)
     def __init__(self, view: 'StreaksMainView'):
@@ -3220,6 +3284,30 @@ async def on_message(message: discord.Message):
                 except Exception as e:
                     logger.error(f"[發送升等訊息失敗]: {e}")
 
+@bot.event
+async def on_automod_action(execution: discord.AutoModAction):
+    # 🎯 一次觸發如果同時有 block_message + timeout 兩個動作，Discord 會各發一次事件，
+    # 只在 timeout 這一次私訊，避免使用者收到兩則重複通知
+    if execution.action.type != discord.AutoModRuleActionType.timeout:
+        return
+
+    member = execution.member
+    if not member:
+        return
+
+    duration = execution.action.duration
+    dur_text = f"{int(duration.total_seconds() // 60)} minutes" if duration else "some time"
+
+    try:
+        await member.send(
+            f"⚠️ **Auto Mute**\n"
+            f"U sent a blocked word in **{execution.guild.name}**\n"
+            f"And u have been **Timeout** for **{dur_text}** by system.\n"
+            f"Matched keyword: `{execution.matched_keyword}`"
+        )
+    except discord.Forbidden:
+        pass  # 對方關閉私訊，跳過
+    
     # =================================================================
     # 🔥 4. Streaks 系統：連續發言天數統計（每個伺服器獨立）
     # =================================================================
@@ -3358,7 +3446,9 @@ async def streaks(interaction: discord.Interaction, user: Optional[discord.Membe
     view = StreaksBoardView(target, interaction.guild)
     embed = view.build_personal_embed()
     await interaction.response.send_message(embed=embed, view=view)
-    
+
+
+
 # =================================================================
 # 🔑 8. RUN BOT
 # =================================================================
