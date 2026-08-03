@@ -2343,21 +2343,25 @@ async def nggyu_error(interaction: discord.Interaction, error: app_commands.AppC
 # =================================================================
 import yt_dlp
 
-YTDLP_OPTS = {
-    "format": "bestaudio/best",
-    "noplaylist": True,
-    "quiet": True,
-    "no_warnings": True,
-    "default_search": "ytsearch1",
-    "source_address": "0.0.0.0",
-    "extractor_args": {
-        "youtube": {
-            "player_client": ["android", "ios"],  # 🎯 拿掉 web（最近常被 YouTube 的 SABR 機制搞到格式抓不到）
-            "formats": ["missing_pot"],           # 🎯 允許使用缺少 PO Token 的格式，犧牲一點點畫質/穩定性換可用性
-        }
-    },
-    **({"cookiefile": "cookies.txt"} if os.path.exists("cookies.txt") else {}),
-}
+def _build_ytdlp_opts() -> dict:
+    """每次呼叫時才檢查 cookies.txt 存不存在，不用改了 cookies 就要重啟 bot"""
+    opts = {
+        "format": "bestaudio/best",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "default_search": "ytsearch1",
+        "source_address": "0.0.0.0",
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "ios"],
+                "formats": ["missing_pot"],
+            }
+        },
+    }
+    if os.path.exists("cookies.txt"):
+        opts["cookiefile"] = "cookies.txt"
+    return opts
 
 FFMPEG_OPTS = {
     "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
@@ -2366,7 +2370,7 @@ FFMPEG_OPTS = {
 
 
 def _ytdlp_extract(query: str) -> dict:
-    with yt_dlp.YoutubeDL(YTDLP_OPTS) as ydl:
+    with yt_dlp.YoutubeDL(_build_ytdlp_opts()) as ydl:
         info = ydl.extract_info(query, download=False)
         if "entries" in info:
             info = info["entries"][0]
