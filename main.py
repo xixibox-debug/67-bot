@@ -1606,6 +1606,7 @@ async def kick(interaction: discord.Interaction, user: discord.Member, reason: O
 
     try:
         await user.kick(reason=reason)
+        await send_goodbye_message(user, interaction.guild)  # 🎯 主動發送，不等 Gateway 事件（可能因快取問題漏掉）
         embed = discord.Embed(title=parse_placeholders("✅ {user.name} has been kicked.", user, interaction.guild), color=0xe74c3c, description=parse_placeholders("Reason: {reason}", user, interaction.guild, extra={"reason": reason}))
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.send_message(embed=embed)
@@ -1639,6 +1640,9 @@ async def ban(interaction: discord.Interaction, user: str, reason: Optional[str]
 
     try:
         await interaction.guild.ban(target, reason=reason)
+        if is_member:
+            # 🎯 主動發送，不等 Gateway 事件；is_member 才發是因為本來就不在群內的人沒有「離開」可言
+            await send_goodbye_message(target, interaction.guild)
         embed = discord.Embed(
             title=parse_placeholders("✅ {user.name} has been banned.", target, interaction.guild), 
             color=0xe74c3c, 
@@ -2997,13 +3001,13 @@ async def on_member_join(member: discord.Member):
                     logger.error(f"[Give role when join] 沒有權限在 {guild.name} 給 {member} 加身分組")
     except Exception 
 
-@bot.event
-async def on_member_remove(member: discord.Member):
+async def send_goodbye_message(member: discord.Member, guild: discord.Guild):
+    """發送離群訊息（涵蓋自己離開、被踢、被封鎖），共用邏輯，讓 /kick、/ban 可以主動呼叫，不用等待可能漏掉的 Gateway 事件"""
     if member.bot: return
-    if not is_feature_enabled(member.guild.id, "welcome"): return
+    if not is_feature_enabled(guild.id, "welcome"): return
     try:
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-        cursor.execute("SELECT channel_id, g_title, g_desc FROM welcome WHERE guild_id = ?", (str(member.guild.id),))
+        cursor.execute("SELECT channel_id, g_title, g_desc FROM welcome WHERE guild_id = ?", (str(guild.id),))
         row = cursor.fetchone(); conn.close()
         if row and row[0]:
             try:
@@ -3011,15 +3015,20 @@ async def on_member_remove(member: discord.Member):
                 channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
             except: return
             if channel:
-                title = parse_placeholders(row[1] or "Goodbye!", member, member.guild)
-                desc = parse_placeholders(row[2], member, member.guild)
+                title = parse_placeholders(row[1] or "Goodbye!", member, guild)
+                desc = parse_placeholders(row[2], member, guild)
                 embed_color = discord.Color(0xe74c3c)
                 embed = discord.Embed(title=title, description=desc, color=embed_color)
                 embed.set_thumbnail(url=member.display_avatar.url)
-                embed.set_footer(text=f"{member.guild.name}｜67")
+                embed.set_footer(text=f"{guild.name}｜67")
                 await channel.send(embed=embed)
-    except Exception as e: logger.error(f"[on_member_remove 崩潰]: {e}")
+    except Exception as e: logger.error(f"[send_goodbye_message 崩潰]: {e}")
 
+
+@bot.event
+async def on_member_remove(member: discord.Member):
+    # 🎯 涵蓋「自己退出」跟其他不是透過我們自己指令觸發的移除（例如用 Discord 原生介面踢人）
+    await send_goodbye_message(member, member.guild)
 
 
 async def tavily_search(query: str) -> str:
