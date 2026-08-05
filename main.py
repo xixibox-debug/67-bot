@@ -92,11 +92,23 @@ def ensure_column(cursor, table: str, column: str, col_def: str):
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
+    # 🎯 開啟 WAL 模式：讀取不會被寫入卡住，大幅降低多個連線互搶造成的阻塞
+    # 這是寫進資料庫檔案本身的設定，只需要在啟動時設一次，之後所有 sqlite3.connect() 都會自動套用
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout=5000;")
+    conn.commit()
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS welcome (
             guild_id TEXT PRIMARY KEY, channel_id TEXT, 
             w_title TEXT, w_desc TEXT, g_title TEXT, g_desc TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS welcome_roles (
+            guild_id TEXT,
+            role_id TEXT,
+            PRIMARY KEY (guild_id, role_id)
         )
     """)
     cursor.execute("CREATE TABLE IF NOT EXISTS levelup (guild_id TEXT PRIMARY KEY, channel_id TEXT, message TEXT)")
@@ -728,13 +740,18 @@ class WelcomeConfigView(ui.View):
             self.remove_item(self.set_channel)
             self.remove_item(self.edit_msg)
             self.remove_item(self.reset_panel)
+            self.remove_item(self.set_join_roles)
         elif guild_id:
             conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
             cursor.execute("SELECT channel_id FROM welcome WHERE guild_id = ?", (str(guild_id),))
             row = cursor.fetchone()
+            cursor.execute("SELECT role_id FROM welcome_roles WHERE guild_id = ?", (str(guild_id),))
+            role_rows = cursor.fetchall()
             conn.close()
             if row and row[0] and str(row[0]).isdigit():
                 self.set_channel.default_values = [discord.Object(id=int(row[0]))]
+            if role_rows:
+                self.set_join_roles.default_values = [discord.Object(id=int(rid)) for (rid,) in role_rows]
 
     def build_embed(self, guild: discord.Guild) -> discord.Embed:
         enabled = is_feature_enabled(self.guild_id, "welcome")
@@ -747,9 +764,14 @@ class WelcomeConfigView(ui.View):
             row = cursor.fetchone(); conn.close()
             cid, w_t, w_d, g_t, g_d = row if row else (None, None, None, None, None)
             ch_text = f"<#{cid}>" if cid else "Not set"
+            cursor2 = sqlite3.connect(DB_PATH).cursor()
+            cursor2.execute("SELECT role_id FROM welcome_roles WHERE guild_id = ?", (str(self.guild_id),))
+            join_role_rows = cursor2.fetchall()
+            join_roles_text = ", ".join(f"<@&{rid}>" for (rid,) in join_role_rows) if join_role_rows else "Not set"
             embed.description = (
                 f"Status: **on**\n"
-                f"Notification channel: {ch_text}\n\n"
+                f"Notification channel: {ch_text}\n"
+                f"Give role when join: {join_roles_text}\n\n"
                 f"**Welcome Embed title:**\n```\n{w_t or 'Not set'}\n```\n"
                 f"**Welcome Embed content:**\n```\n{w_d or 'Not set'}\n```\n"
                 f"**Goodbye Embed title:**\n```\n{g_t or 'Not set'}\n```\n"
@@ -789,6 +811,16 @@ class WelcomeConfigView(ui.View):
         new_view = WelcomeConfigView(interaction.guild_id)
         await interaction.response.edit_message(embed=new_view.build_embed(interaction.guild), view=new_view)
 
+    @ui.select(cls=ui.RoleSelect, placeholder="🎭 Give role when join", min_values=0, max_values=25)
+    async def set_join_roles(self, interaction: discord.Interaction, select: ui.RoleSelect):
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute("DELETE FROM welcome_roles WHERE guild_id = ?", (str(interaction.guild_id),))
+        for role in select.values:
+            cursor.execute("INSERT OR IGNORE INTO welcome_roles (guild_id, role_id) VALUES (?, ?)", (str(interaction.guild_id), str(role.id)))
+        conn.commit(); conn.close()
+        new_view = WelcomeConfigView(interaction.guild_id)
+        await interaction.response.edit_message(embed=new_view.build_embed(interaction.guild), view=new_view)
+
     @ui.button(label="📝 Edit Cards (Modal)", style=discord.ButtonStyle.primary)
     async def edit_msg(self, interaction: discord.Interaction, button: ui.Button):
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
@@ -801,6 +833,7 @@ class WelcomeConfigView(ui.View):
     async def reset_panel(self, interaction: discord.Interaction, button: ui.Button):
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
         cursor.execute("DELETE FROM welcome WHERE guild_id = ?", (str(interaction.guild_id),))
+        cursor.execute("DELETE FROM welcome_roles WHERE guild_id = ?", (str(interaction.guild_id),))
         conn.commit(); conn.close()
         new_view = WelcomeConfigView(interaction.guild_id)
         await interaction.response.edit_message(embed=new_view.build_embed(interaction.guild), view=new_view)
@@ -2415,9 +2448,10 @@ class MusicControlView(ui.View):
 
     @ui.button(label="⏯️ Pause/Resume", style=discord.ButtonStyle.primary, custom_id="music:pauseresume")
     async def pause_resume(self, interaction: discord.Interaction, button: ui.Button):
-        state = music_states.get(interaction.guild_id)
-        if not state or not state.voice_client:
-            return await interaction.response.send_message("❌ Nothing is playing.", ephemeral=True)
+        try:
+            state = music_states.get(interaction.guild_id)
+            if not state or not state.voice_client:
+                return await interaction.response.send_message("❌ Nothing is playing.", ephemeral=True)
         if state.voice_client.is_playing():
             state.voice_client.pause()
             state.is_paused = True
@@ -2429,9 +2463,10 @@ class MusicControlView(ui.View):
 
     @ui.button(label="⏭️ Skip", style=discord.ButtonStyle.secondary, custom_id="music:skip")
     async def skip(self, interaction: discord.Interaction, button: ui.Button):
-        state = music_states.get(interaction.guild_id)
-        if not state or not state.voice_client or not (state.voice_client.is_playing() or state.voice_client.is_paused()):
-            return await interaction.response.send_message("❌ Nothing is playing.", ephemeral=True)
+        try:
+            state = music_states.get(interaction.guild_id)
+            if not state or not state.voice_client:
+                return await interaction.response.send_message("❌ Nothing is playing.", ephemeral=True)
         state.voice_client.stop()  # 觸發 after callback，自動播下一首
         await interaction.response.send_message("⏭️ Skipped.", ephemeral=True)
 
@@ -2947,7 +2982,20 @@ async def on_member_join(member: discord.Member):
                 embed.set_thumbnail(url=member.display_avatar.url)
                 embed.set_footer(text=f"{guild.name}｜67")
                 await channel.send(content=member.mention, embed=embed)
-    except Exception as e: logger.error(f"[on_member_join 崩潰]: {e}")
+
+        # 🎯 Give role when join：不管有沒有設定歡迎頻道，只要有設定身分組就發放
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute("SELECT role_id FROM welcome_roles WHERE guild_id = ?", (str(guild.id),))
+        role_rows = cursor.fetchall(); conn.close()
+        if role_rows:
+            roles_to_give = [guild.get_role(int(rid)) for (rid,) in role_rows]
+            roles_to_give = [r for r in roles_to_give if r is not None]
+            if roles_to_give:
+                try:
+                    await member.add_roles(*roles_to_give, reason="Give role when join")
+                except discord.Forbidden:
+                    logger.error(f"[Give role when join] 沒有權限在 {guild.name} 給 {member} 加身分組")
+    except Exception 
 
 @bot.event
 async def on_member_remove(member: discord.Member):
