@@ -2456,14 +2456,16 @@ class MusicControlView(ui.View):
             state = music_states.get(interaction.guild_id)
             if not state or not state.voice_client:
                 return await interaction.response.send_message("❌ Nothing is playing.", ephemeral=True)
-        if state.voice_client.is_playing():
-            state.voice_client.pause()
-            state.is_paused = True
-        elif state.voice_client.is_paused():
-            state.voice_client.resume()
-            state.is_paused = False
-        await interaction.response.defer()
-        await update_music_panel(interaction.guild_id)
+            if state.voice_client.is_playing():
+                state.voice_client.pause()
+                state.is_paused = True
+            elif state.voice_client.is_paused():
+                state.voice_client.resume()
+                state.is_paused = False
+            await interaction.response.defer()
+            await update_music_panel(interaction.guild_id)
+        except discord.NotFound:
+            pass
 
     @ui.button(label="⏭️ Skip", style=discord.ButtonStyle.secondary, custom_id="music:skip")
     async def skip(self, interaction: discord.Interaction, button: ui.Button):
@@ -2471,21 +2473,29 @@ class MusicControlView(ui.View):
             state = music_states.get(interaction.guild_id)
             if not state or not state.voice_client:
                 return await interaction.response.send_message("❌ Nothing is playing.", ephemeral=True)
-        state.voice_client.stop()  # 觸發 after callback，自動播下一首
-        await interaction.response.send_message("⏭️ Skipped.", ephemeral=True)
+            state.voice_client.stop()  # 觸發 after callback，自動播下一首
+            await interaction.response.send_message("⏭️ Skipped.", ephemeral=True)
+        except discord.NotFound:
+            pass
 
     @ui.button(label="⏹️ Stop", style=discord.ButtonStyle.danger, custom_id="music:stop")
     async def stop_button(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.defer()
-        await stop_music(interaction.guild_id)
+        try:
+            await interaction.response.defer()
+            await stop_music(interaction.guild_id)
+        except discord.NotFound:
+            pass
 
     @ui.button(label="📃 Queue", style=discord.ButtonStyle.secondary, custom_id="music:queue")
     async def show_queue(self, interaction: discord.Interaction, button: ui.Button):
-        state = music_states.get(interaction.guild_id)
-        if not state or not state.queue:
-            return await interaction.response.send_message("📃 Queue is empty.", ephemeral=True)
-        lines = [f"{i + 1}. {s['title']}" for i, s in enumerate(state.queue[:10])]
-        await interaction.response.send_message("**Up Next:**\n" + "\n".join(lines), ephemeral=True)
+        try:
+            state = music_states.get(interaction.guild_id)
+            if not state or not state.queue:
+                return await interaction.response.send_message("📃 Queue is empty.", ephemeral=True)
+            lines = [f"{i + 1}. {s['title']}" for i, s in enumerate(state.queue[:10])]
+            await interaction.response.send_message("**Up Next:**\n" + "\n".join(lines), ephemeral=True)
+        except discord.NotFound:
+            pass
 
 
 async def update_music_panel(guild_id: int, ended: bool = False):
