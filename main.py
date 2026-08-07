@@ -49,6 +49,28 @@ groq_client = AsyncOpenAI(
     api_key=os.getenv("GROQ_API_KEY"),
     base_url="https://api.groq.com/openai/v1"
 )
+
+# 3. Ollama Cloud 客戶端 (GLM 5.2，第三防線；因為是中國模型，禁止碰政治話題，見下方 POLITICAL_KEYWORDS)
+ollama_client = AsyncOpenAI(
+    api_key=os.getenv("OLLAMA_API_KEY"),
+    base_url="https://ollama.com/v1"
+)
+
+# 🚫 政治相關關鍵字，命中就直接跳過 GLM 這個防線，不會讓這個模型碰到政治話題
+POLITICAL_KEYWORDS = [
+    "政治", "政黨", "選舉", "總統", "首相", "主席", "立法院", "國會", "民主", "獨裁",
+    "台獨", "台灣獨立", "統一", "一國兩制", "共產黨", "國民黨", "民進黨", "習近平",
+    "六四", "天安門", "新疆", "西藏", "香港獨立", "反送中", "法輪功", "人權", "示威",
+    "抗議", "革命", "政變", "戰爭", "軍事衝突", "制裁",
+    "politics", "political", "election", "president", "prime minister", "government policy",
+    "democracy", "dictatorship", "communist party", "taiwan independence", "tiananmen",
+    "xinjiang", "tibet", "hong kong independence", "human rights", "protest", "coup", "sanctions",
+]
+
+def is_political_topic(text: str) -> bool:
+    lowered = text.lower()
+    return any(kw.lower() in lowered for kw in POLITICAL_KEYWORDS)
+
 ai_cooldowns = {}
 
 # 🎯 語音時數追蹤：(guild_id, user_id) -> 進入監聽頻道的時間戳
@@ -3009,7 +3031,7 @@ async def on_member_join(member: discord.Member):
                     await member.add_roles(*roles_to_give, reason="Give role when join")
                 except discord.Forbidden:
                     logger.error(f"[Give role when join] 沒有權限在 {guild.name} 給 {member} 加身分組")
-    except Exception 
+    except Exception as e: logger.error(f"[on_member_join 崩潰]: {e}")
 
 async def send_goodbye_message(member: discord.Member, guild: discord.Guild):
     """發送離群訊息（涵蓋自己離開、被踢、被封鎖），共用邏輯，讓 /kick、/ban 可以主動呼叫，不用等待可能漏掉的 Gateway 事件"""
@@ -3209,17 +3231,53 @@ async def on_message(message: discord.Message):
                 ai_reply = None
                 
                 # ===========================================================
-                # 🛡️ ⚔️ 雙陣營火線防禦機制 (Gemini 直連 -> Groq 備援)
+                # 🛡️ ⚔️ 三陣營火線防禦機制 (Ollama GLM -> Gemini -> Groq)
                 # ===========================================================
-                
-# ───【第一防線：直連 Google Gemini API 輪詢機制】───
                 used_provider = None  # 💡 用於追蹤是哪一個模型成功回應
-                
+
+                # ───【第一防線：Ollama Cloud (GLM 5.2)】───
+                if os.getenv("OLLAMA_API_KEY") and not ai_reply:
+                    if is_political_topic(clean_content):
+                        logger.info("🚫 [第一防線] 偵測到政治相關內容，跳過 GLM（中國模型），直接進下一防線")
+                    else:
+                        try:
+                            logger.info("🤖 [1/3] 優先請求 Ollama Cloud (GLM 5.2)...")
+                            ollama_messages = [
+                                {
+                                    "role": "system",
+                                    "content": (
+                                        "You are an AI model in a Discord bot called '67'. "
+                                        "IMPORTANT: You must NEVER discuss politics, political figures, political parties, "
+                                        "elections, government policy, geopolitical conflicts, or any politically sensitive "
+                                        "topics of any country. If asked about politics, politely decline and say you can't "
+                                        "discuss political topics, then offer to help with something else. "
+                                        "Use ENGLISH to response. but if the user use chinese, u should use TRADITIONAL CHINESE "
+                                        "to response. DONT use Simplified chinese. Max 800 characters.\n\n"
+                                        f"【請優先參考以下網路即時資訊回答】：\n{search_context}"
+                                    )
+                                }
+                            ]
+                            ollama_messages.extend(conversation_history)
+                            ollama_messages.append({"role": "user", "content": clean_content})
+
+                            ollama_response = await ollama_client.chat.completions.create(
+                                model="glm-5.2:cloud",
+                                messages=ollama_messages,
+                                temperature=0.7,
+                            )
+                            ai_reply = ollama_response.choices[0].message.content
+                            if ai_reply:
+                                logger.info("✨ [第一防線] Ollama (GLM 5.2) 成功回應！")
+                                used_provider = "ollama_glm"
+                        except Exception as ollama_err:
+                            logger.warning(f"⚠️ [第一防線] Ollama (GLM 5.2) 失敗: {ollama_err}，準備切換下一順位...")
+
+                # ───【第二防線：直連 Google Gemini API 輪詢機制】───
                 if os.getenv("GEMINI_API_KEY") and not ai_reply:
                     gemini_models = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3-flash", "gemini-2.5-flash", "gmeini-3.5-flash-lite", "gemini-3.1-flash-lite"]
                     for model_name in gemini_models:
                         try:
-                            logger.info(f"🤖 優先請求直連 Gemini API ({model_name})...")
+                            logger.info(f"🤖 [2/3] 請求直連 Gemini API ({model_name})...")
                             gemini_response = await gemini_client.chat.completions.create(
                                 model=model_name, 
                                 messages=ai_messages,
@@ -3227,7 +3285,7 @@ async def on_message(message: discord.Message):
                             )
                             ai_reply = gemini_response.choices[0].message.content
                             if ai_reply:
-                                logger.info(f"✨ [第一防線] 直連 Gemini ({model_name}) 成功救援故事！")
+                                logger.info(f"✨ [第二防線] 直連 Gemini ({model_name}) 成功救援故事！")
                                 # 💡 根據成功回應的模型決定標記
                                 if model_name in ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3-flash", "gemini-2.5-flash"]:
                                     used_provider = "gemini_loop"
@@ -3235,12 +3293,12 @@ async def on_message(message: discord.Message):
                                     used_provider = "gemini_lite"
                                 break  # 成功取得回應，跳出 Gemini 輪詢
                         except Exception as gemini_err:
-                            logger.warning(f"⚠️ [第一防線] Gemini ({model_name}) 直連失敗: {gemini_err}，準備切換下一順位...")
+                            logger.warning(f"⚠️ [第二防線] Gemini ({model_name}) 直連失敗: {gemini_err}，準備切換下一順位...")
 
-                # ───【第二防線：Groq API 終極備援】───
+                # ───【第三防線：Groq API 終極備援】───
                 if not ai_reply:
                     try:
-                        logger.info("🤖 [2/2] 前方失敗！觸發最終底線，請求 Groq API (llama-3.3-70b-versatile)...")
+                        logger.info("🤖 [3/3] 前方失敗！觸發最終底線，請求 Groq API (llama-3.3-70b-versatile)...")
                         groq_response = await groq_client.chat.completions.create(
                             model="llama-3.3-70b-versatile",
                             messages=ai_messages,
@@ -3249,11 +3307,11 @@ async def on_message(message: discord.Message):
                         )
                         ai_reply = groq_response.choices[0].message.content
                         if ai_reply:
-                            logger.info("✨ [第二防線] Groq 終極防線救援成功！")
+                            logger.info("✨ [第三防線] Groq 終極防線救援成功！")
                             used_provider = "groq"
                     except Exception as groq_err:
-                        logger.error(f"❌ [第二防線] Groq 也失敗了: {groq_err}")
-                
+                        logger.error(f"❌ [第三防線] Groq 也失敗了: {groq_err}")
+
                 # ───【🚨 終極檢查：全線癱瘓防範】───
                 if not ai_reply:
                     logger.error("❌ [核心崩潰] Gemini 與 Groq API 管道於本次故事請求中全數癱瘓。")
@@ -3271,6 +3329,8 @@ async def on_message(message: discord.Message):
                     watermark = "\n\n-# **67+AI (2.5a)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
                 elif used_provider == "groq":
                     watermark = "\n\n-# **67+AI (1)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
+                elif used_provider == "ollama_glm":
+                    watermark = "\n\n-# **67+AI (3)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
                 else:
                     watermark = "\n\n-# 67+AI suck and frequently makes mistakes; please verify it yourself."
 
