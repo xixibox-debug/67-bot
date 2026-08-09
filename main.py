@@ -3415,30 +3415,6 @@ async def on_message(message: discord.Message):
                 except Exception as e:
                     logger.error(f"[發送升等訊息失敗]: {e}")
 
-@bot.event
-async def on_automod_action(execution: discord.AutoModAction):
-    # 🎯 一次觸發如果同時有 block_message + timeout 兩個動作，Discord 會各發一次事件，
-    # 只在 timeout 這一次私訊，避免使用者收到兩則重複通知
-    if execution.action.type != discord.AutoModRuleActionType.timeout:
-        return
-
-    member = execution.member
-    if not member:
-        return
-
-    duration = execution.action.duration
-    dur_text = f"{int(duration.total_seconds() // 60)} minutes" if duration else "some time"
-
-    try:
-        await member.send(
-            f"⚠️ **Auto Mute**\n"
-            f"U sent a blocked word in **{execution.guild.name}**\n"
-            f"And u have been **Timeout** for **{dur_text}** by system.\n"
-            f"Matched keyword: `{execution.matched_keyword}`"
-        )
-    except discord.Forbidden:
-        pass  # 對方關閉私訊，跳過
-    
     # =================================================================
     # 🔥 4. Streaks 系統：連續發言天數統計（每個伺服器獨立）
     # =================================================================
@@ -3498,6 +3474,31 @@ async def on_automod_action(execution: discord.AutoModAction):
         conn.commit()
 
     conn.close()
+
+
+@bot.event
+async def on_automod_action(execution: discord.AutoModAction):
+    # 🎯 一次觸發如果同時有 block_message + timeout 兩個動作，Discord 會各發一次事件，
+    # 只在 timeout 這一次私訊，避免使用者收到兩則重複通知
+    if execution.action.type != discord.AutoModRuleActionType.timeout:
+        return
+
+    member = execution.member
+    if not member:
+        return
+
+    duration = execution.action.duration
+    dur_text = f"{int(duration.total_seconds() // 60)} minutes" if duration else "some time"
+
+    try:
+        await member.send(
+            f"⚠️ **Auto Mute**\n"
+            f"U sent a blocked word in **{execution.guild.name}**\n"
+            f"And u have been **Timeout** for **{dur_text}** by system.\n"
+            f"Matched keyword: `{execution.matched_keyword}`"
+        )
+    except discord.Forbidden:
+        pass  # 對方關閉私訊，跳過
 
 class StreaksBoardView(ui.View):
     def __init__(self, target: discord.User, guild: discord.Guild):
