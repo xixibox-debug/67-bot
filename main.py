@@ -50,10 +50,10 @@ groq_client = AsyncOpenAI(
     base_url="https://api.groq.com/openai/v1"
 )
 
-# 3. Ollama Cloud 客戶端 (GLM 5.2，第三防線；因為是中國模型，禁止碰政治話題，見下方 POLITICAL_KEYWORDS)
-ollama_client = AsyncOpenAI(
-    api_key=os.getenv("OLLAMA_API_KEY"),
-    base_url="https://ollama.com/v1"
+# 3. Kimi（Moonshot）客戶端（第一防線；中國模型，禁止碰政治話題，見下方 POLITICAL_KEYWORDS）
+kimi_client = AsyncOpenAI(
+    api_key=os.getenv("KIMI_API_KEY"),   # 或你自己的 KIMI_API_KEY
+    base_url="https://api.moonshot.ai/v1"   # 國際站改成 https://api.moonshot.ai/v1
 )
 
 # 🚫 政治相關關鍵字，命中就直接跳過 GLM 這個防線，不會讓這個模型碰到政治話題
@@ -135,6 +135,7 @@ def init_db():
     """)
     cursor.execute("CREATE TABLE IF NOT EXISTS levelup (guild_id TEXT PRIMARY KEY, channel_id TEXT, message TEXT)")
     ensure_column(cursor, "levelup", "reply_mode", "INTEGER DEFAULT 0")  # 🎯 0=發到頻道, 1=在該訊息下回覆
+    ensure_column(cursor, "levelup", "admin_xp_per_level", "INTEGER DEFAULT 500")  # 🎯 管理員優待：每等固定要多少 XP
     cursor.execute("CREATE TABLE IF NOT EXISTS announcements (id INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT, message TEXT, channel_id TEXT)")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS levels (
@@ -279,10 +280,17 @@ init_db()
 # =================================================================
 # 🔄 3. CORE UTILITIES (核心工具函式與變數解析)
 # =================================================================
-def get_xp_needed(level: int, is_admin: bool = False) -> int:
+def get_xp_needed(level: int, is_admin: bool = False, admin_xp: int = 500) -> int:
     if is_admin:
-        return 150  # 管理員專屬：每一等都固定只要 150 XP
+        return admin_xp  # 管理員專屬：每一等都固定要這個數字的 XP，可在 /settings 調整
     return 5 * (level ** 2) + 50 * level + 100
+
+
+def get_admin_xp_per_level(guild_id) -> int:
+    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+    cursor.execute("SELECT admin_xp_per_level FROM levelup WHERE guild_id = ?", (str(guild_id),))
+    row = cursor.fetchone(); conn.close()
+    return row[0] if row and row[0] else 500
 
 async def check_level_roles(member: discord.Member, level: int):
     """檢查並發放該等級對應的身分組獎勵"""
@@ -751,7 +759,7 @@ class WelcomeGoodbyeModal(ui.Modal, title="Set Welcome Message"):
 
 class WelcomeConfigView(ui.View):
     def __init__(self, guild_id: int = None):
-        super().__init__(timeout=300)
+        super().__init__(timeout=None)
         self.guild_id = guild_id
         enabled = is_feature_enabled(guild_id, "welcome") if guild_id else False
         self.toggle_enabled.label = "✅ Status: On" if enabled else "❌ Status: Off"
@@ -875,9 +883,31 @@ class LevelMessageModal(ui.Modal, title="Set Level Up Message"):
         await interaction.response.send_message(f"✅ **Message Saved!** Preview: {preview}", ephemeral=True)
 
 
+class AdminXpModal(ui.Modal, title="Set Admin XP Per Level"):
+    value = ui.TextInput(label="XP needed per level for admins (1-99999)", required=True, max_length=5)
+
+    def __init__(self, view: 'LevelSettingsView'):
+        super().__init__()
+        self.view = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not self.value.value.isdigit() or int(self.value.value) < 1:
+            return await interaction.response.send_message("❌ Please enter a valid positive number.", ephemeral=True)
+        val = int(self.value.value)
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO levelup (guild_id, admin_xp_per_level) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET admin_xp_per_level = excluded.admin_xp_per_level",
+            (str(interaction.guild_id), val)
+        )
+        conn.commit(); conn.close()
+        embed = self.view.build_embed(interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=self.view)
+
+
 class LevelSettingsView(ui.View):
     def __init__(self, guild_id: int = None):
-        super().__init__(timeout=180)
+        super().__init__(timeout=None)
         self.guild_id = guild_id
         enabled = is_feature_enabled(guild_id, "level") if guild_id else False
         self.toggle_enabled.label = "✅ Status: On" if enabled else "❌ Status: Off"
@@ -919,6 +949,7 @@ class LevelSettingsView(ui.View):
                 f"Notification channel: {dest_text}\n\n"
                 f"**Role award:**\n{roles_text}\n\n"
                 f"**Level up message:**\n```\n{msg}\n```\n\n"
+                f"Admin XP per level: **{get_admin_xp_per_level(self.guild_id)}**\n\n"
                 f"📌 Supported dynamic parameter annotations (automatically replaced by the system when filling in):\n"
                 f"• {{user.name}} / {{user.username}} - Display member name\n"
                 f"• {{user.mention}} - Mention the member who leveled up\n"
@@ -976,6 +1007,10 @@ class LevelSettingsView(ui.View):
         )
         await interaction.response.edit_message(embed=embed, view=LevelRoleSettingsView(self))
 
+    @ui.button(label="✏️ Admin XP Per Level", style=discord.ButtonStyle.blurple, row=1)
+    async def set_admin_xp(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_modal(AdminXpModal(self))
+
     @ui.button(label="Modify Level Message", style=discord.ButtonStyle.success, row=2)
     async def mod_text(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(LevelMessageModal())
@@ -1004,7 +1039,7 @@ class LevelRoleModal(ui.Modal, title="Set give role to select level"):
 
 class LevelRoleSettingsView(ui.View):
     def __init__(self, original_view: 'LevelSettingsView'):
-        super().__init__(timeout=60)
+        super().__init__(timeout=None)
         self.original_view = original_view
 
     @ui.select(cls=ui.RoleSelect, placeholder="Select the role", min_values=1, max_values=1)
@@ -1063,7 +1098,7 @@ class BannedWordDeleteSelect(ui.Select):
 
 class AutoMuteConfigView(ui.View):
     def __init__(self, guild_id: int):
-        super().__init__(timeout=300)
+        super().__init__(timeout=None)
         self.guild_id = guild_id
         enabled = is_feature_enabled(guild_id, "automute")
         self.toggle_enabled.label = "✅ Status: On" if enabled else "❌ Status: Off"
@@ -1176,7 +1211,7 @@ class TimeMessageDeleteSelect(ui.Select):
 
 class TimeMessageConfigView(ui.View):
     def __init__(self, guild_id: int):
-        super().__init__(timeout=300)
+        super().__init__(timeout=None)
         self.guild_id = guild_id
         enabled = is_feature_enabled(guild_id, "timemsg")
         self.toggle_enabled.label = "✅ Status: On" if enabled else "❌ Status: Off"
@@ -1338,7 +1373,7 @@ class StreaksNicknameModal(ui.Modal, title="Set Nickname Emoji Condition"):
 
 class StreaksChannelSelectView(ui.View):
     def __init__(self, guild_id: int, parent_view: 'StreaksMainView'):
-        super().__init__(timeout=120)
+        super().__init__(timeout=None)
         self.guild_id = guild_id
         self.parent_view = parent_view
         conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
@@ -1386,7 +1421,7 @@ class StreaksRoleModal(ui.Modal, title="Set streak requirement for role"):
 
 class StreaksRoleSettingsView(ui.View):
     def __init__(self, parent_view: 'StreaksMainView'):
-        super().__init__(timeout=120)
+        super().__init__(timeout=None)
         self.parent_view = parent_view
 
     @ui.select(cls=ui.RoleSelect, placeholder="Select the role", min_values=1, max_values=1)
@@ -1401,7 +1436,7 @@ class StreaksRoleSettingsView(ui.View):
 
 class StreaksMainView(ui.View):
     def __init__(self, guild_id: int):
-        super().__init__(timeout=180)
+        super().__init__(timeout=None)
         self.guild_id = guild_id
         enabled = is_feature_enabled(guild_id, "streaks")
         self.toggle_enabled.label = "✅ Status: On" if enabled else "❌ Status: Off"
@@ -1751,7 +1786,7 @@ async def setlevel(interaction: discord.Interaction, user: discord.Member, level
 # 🛠️ 修正點：完全遵循圖 6 藍圖重製的 /level 面板，無任何自創欄位或隱藏修改
 class LevelBoardView(ui.View):
     def __init__(self, target: discord.User, guild: discord.Guild):
-        super().__init__(timeout=60)
+        super().__init__(timeout=None)
         self.target = target
         self.guild = guild
         self.mode = "personal"
@@ -1780,7 +1815,8 @@ class LevelBoardView(ui.View):
 
             xp, lvl, count_67 = row if row else (0, 1, 0)
             is_admin = self.target.guild_permissions.administrator if isinstance(self.target, discord.Member) else False
-            xp_needed = get_xp_needed(lvl, is_admin)
+            admin_xp = get_admin_xp_per_level(self.guild.id)
+            xp_needed = get_xp_needed(lvl, is_admin, admin_xp)
 
             cursor.execute("SELECT COUNT(*) FROM levels WHERE guild_id = ? AND (level > ? OR (level = ? AND xp > ?))", (gid, lvl, lvl, xp))
             level_rank = cursor.fetchone()[0] + 1
@@ -1820,7 +1856,8 @@ async def level(interaction: discord.Interaction, user: Optional[discord.Member]
     
     xp, lvl, count_67 = row if row else (0, 1, 0)
     is_admin = target.guild_permissions.administrator if isinstance(target, discord.Member) else False
-    xp_needed = get_xp_needed(lvl, is_admin)
+    admin_xp = get_admin_xp_per_level(interaction.guild_id)
+    xp_needed = get_xp_needed(lvl, is_admin, admin_xp)
     
     # 📈 高效率同伺服器內即時排名計算
     cursor.execute("SELECT COUNT(*) FROM levels WHERE guild_id = ? AND (level > ? OR (level = ? AND xp > ?))", (gid, lvl, lvl, xp))
@@ -1944,7 +1981,7 @@ async def random67(interaction: discord.Interaction, language: Literal["English"
 
 class EcoBalanceView(ui.View):
     def __init__(self, target: discord.User, guild: discord.Guild):
-        super().__init__(timeout=60)
+        super().__init__(timeout=None)
         self.target = target
         self.guild = guild
         self.mode = "balance"
@@ -3235,14 +3272,14 @@ async def on_message(message: discord.Message):
                 # ===========================================================
                 used_provider = None  # 💡 用於追蹤是哪一個模型成功回應
 
-                # ───【第一防線：Ollama Cloud (GLM 5.2)】───
-                if os.getenv("OLLAMA_API_KEY") and not ai_reply:
+                # ───【第一防線：Kimi（Moonshot）】───
+                if os.getenv("MOONSHOT_API_KEY") and not ai_reply:
                     if is_political_topic(clean_content):
-                        logger.info("🚫 [第一防線] 偵測到政治相關內容，跳過 GLM（中國模型），直接進下一防線")
+                        logger.info("🚫 [第一防線] 偵測到政治相關內容，跳過 Kimi（中國模型），直接進下一防線")
                     else:
                         try:
-                            logger.info("🤖 [1/3] 優先請求 Ollama Cloud (GLM 5.2)...")
-                            ollama_messages = [
+                            logger.info("🤖 [1/3] 優先請求 Kimi API...")
+                            kimi_messages = [
                                 {
                                     "role": "system",
                                     "content": (
@@ -3257,20 +3294,20 @@ async def on_message(message: discord.Message):
                                     )
                                 }
                             ]
-                            ollama_messages.extend(conversation_history)
-                            ollama_messages.append({"role": "user", "content": clean_content})
-
-                            ollama_response = await ollama_client.chat.completions.create(
-                                model="glm-5.2:cloud",
-                                messages=ollama_messages,
+                            kimi_messages.extend(conversation_history)
+                            kimi_messages.append({"role": "user", "content": clean_content})
+                
+                            kimi_response = await kimi_client.chat.completions.create(
+                                model="kimi-k3",          # 可改成 kimi-k2.6 / kimi-k3，看你要的性價比
+                                messages=kimi_messages,
                                 temperature=0.7,
                             )
-                            ai_reply = ollama_response.choices[0].message.content
+                            ai_reply = kimi_response.choices[0].message.content
                             if ai_reply:
-                                logger.info("✨ [第一防線] Ollama (GLM 5.2) 成功回應！")
-                                used_provider = "ollama_glm"
-                        except Exception as ollama_err:
-                            logger.warning(f"⚠️ [第一防線] Ollama (GLM 5.2) 失敗: {ollama_err}，準備切換下一順位...")
+                                logger.info("✨ [第一防線] Kimi 成功回應！")
+                                used_provider = "kimi"
+                        except Exception as kimi_err:
+                            logger.warning(f"⚠️ [第一防線] Kimi 失敗: {kimi_err}，準備切換下一順位...")
 
                 # ───【第二防線：直連 Google Gemini API 輪詢機制】───
                 if os.getenv("GEMINI_API_KEY") and not ai_reply:
@@ -3329,7 +3366,7 @@ async def on_message(message: discord.Message):
                     watermark = "\n\n-# **67+AI (2.5a)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
                 elif used_provider == "groq":
                     watermark = "\n\n-# **67+AI (1)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
-                elif used_provider == "ollama_glm":
+                elif used_provider == "kimi":
                     watermark = "\n\n-# **67+AI (3)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
                 else:
                     watermark = "\n\n-# 67+AI suck and frequently makes mistakes; please verify it yourself."
@@ -3388,9 +3425,10 @@ async def on_message(message: discord.Message):
         new_lvl = lvl
         
         is_admin = message.author.guild_permissions.administrator if isinstance(message.author, discord.Member) else False
+        admin_xp = get_admin_xp_per_level(gid)
         
-        while new_xp >= get_xp_needed(new_lvl, is_admin):
-            new_xp -= get_xp_needed(new_lvl, is_admin)
+        while new_xp >= get_xp_needed(new_lvl, is_admin, admin_xp):
+            new_xp -= get_xp_needed(new_lvl, is_admin, admin_xp)
             new_lvl += 1
 
         cursor.execute("INSERT OR REPLACE INTO levels (guild_id, user_id, xp, level, count_67) VALUES (?, ?, ?, ?, ?)", (gid, uid, new_xp, new_lvl, count_67))
@@ -3502,7 +3540,7 @@ async def on_automod_action(execution: discord.AutoModAction):
 
 class StreaksBoardView(ui.View):
     def __init__(self, target: discord.User, guild: discord.Guild):
-        super().__init__(timeout=60)
+        super().__init__(timeout=None)
         self.target = target
         self.guild = guild
         self.mode = "personal"
