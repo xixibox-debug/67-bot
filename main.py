@@ -1007,7 +1007,7 @@ class LevelSettingsView(ui.View):
         )
         await interaction.response.edit_message(embed=embed, view=LevelRoleSettingsView(self))
 
-    @ui.button(label="✏️ Admin XP Per Level", style=discord.ButtonStyle.blurple, row=1)
+    @ui.button(label="✏️ Admin XP Per Level", style=discord.ButtonStyle.blurple, row=3)
     async def set_admin_xp(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(AdminXpModal(self))
 
@@ -3273,7 +3273,7 @@ async def on_message(message: discord.Message):
                 used_provider = None  # 💡 用於追蹤是哪一個模型成功回應
 
                 # ───【第一防線：Kimi（Moonshot）】───
-                if os.getenv("MOONSHOT_API_KEY") and not ai_reply:
+                if os.getenv("KIMI_API_KEY") and not ai_reply:
                     if is_political_topic(clean_content):
                         logger.info("🚫 [第一防線] 偵測到政治相關內容，跳過 Kimi（中國模型），直接進下一防線")
                     else:
