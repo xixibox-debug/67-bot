@@ -3200,24 +3200,16 @@ async def on_message(message: discord.Message):
             async with message.channel.typing():
                 
                 # -----------------------------------------------------------
-                # 🧠 核心邏輯：動態爬軌跡，最多回溯 10 則、限時 10 分鐘的連貫回覆
+                # 🧠 核心邏輯：動態爬軌跡，最多回溯 10 則、只要是回覆就算數，不限時間
                 # -----------------------------------------------------------
                 conversation_history = []
                 current_ref = message.reference
                 history_count = 0
                 
-                # discord.py 的 message.created_at 是時區感知的 UTC 時間
-                now_utc = datetime.datetime.now(datetime.timezone.utc)
-                
                 logger.info("🔍 開始追溯單獨連貫的回覆鏈...")
                 while current_ref and current_ref.message_id and history_count < 10:
                     try:
                         ref_msg = await message.channel.fetch_message(current_ref.message_id)
-                        
-                        # ⏳ 檢查時間限制：如果該則訊息距離現在超過 10 分鐘(600秒)，則立即斬斷記憶
-                        if (now_utc - ref_msg.created_at).total_seconds() > 600:
-                            logger.info(f"⏱️ 訊息 {ref_msg.id} 已超過 10 分鐘，停止向上回溯。")
-                            break
                         
                         # 解析並清理內容，依照身份貼上標籤
                         if ref_msg.author.id == bot.user.id:
