@@ -3609,44 +3609,33 @@ async def streaks(interaction: discord.Interaction, user: Optional[discord.Membe
     embed = view.build_personal_embed()
     await interaction.response.send_message(embed=embed, view=view)
 
-@bot.tree.command(name="seeemoji", description="Enlarge the emoji image and get it's URL")
-@app_commands.describe(emoji="Enter the emoji")
+@bot.tree.command(name="seeemoji", description="Enlarge an emoji image in a Container and show its URL")
+@app_commands.describe(emoji="Paste the emoji (e.g. <:kyk:1497866917468442665>)")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def seeemoji(interaction: discord.Interaction, emoji: str):
     emoji = emoji.strip()
-    title = "Emoji"
-    url = None
 
-    # 自訂 emoji：<:name:id> / <a:name:id>
+    # Only accept Discord custom emoji: <:name:id> or <a:name:id>
     m = re.match(r"<(a?):([a-zA-Z0-9_]+):(\d+)>$", emoji)
-    if m:
-        animated, name, eid = m.groups()
-        ext = "gif" if animated else "png"
-        url = f"https://cdn.discordapp.com/emojis/{eid}.{ext}?size=4096&quality=lossless"
-        title = f":{name}:"
-    else:
-        # Unicode → Twemoji
-        try:
-            codepoints = "-".join(f"{ord(c):x}" for c in emoji if ord(c) != 0xfe0f)
-            if not codepoints:
-                raise ValueError("empty")
-            url = f"https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/{codepoints}.png"
-            title = emoji
-        except Exception:
-            return await interaction.response.send_message(
-                "❌ WTF is this? Try to paste on `<:name:id>` or select a emoji form your server",
-                ephemeral=True
-            )
+    if not m:
+        return await interaction.response.send_message(
+            "❌ WTH is this? Paste a Discord custom emoji like `<:name:1234567890>`.",
+            ephemeral=True
+        )
 
-    # Components V2：Container 包 MediaGallery + 網址文字
+    animated, name, eid = m.groups()
+    ext = "gif" if animated else "png"
+    url = f"https://cdn.discordapp.com/emojis/{eid}.{ext}?size=4096&quality=lossless"
+    title = f":{name}:"
+
     view = discord.ui.LayoutView(timeout=None)
     container = discord.ui.Container(
         discord.ui.TextDisplay(f"**{title}**"),
         discord.ui.MediaGallery(
             discord.MediaGalleryItem(media=url, description=title)
         ),
-        discord.ui.TextDisplay(url),  # 一行圖片網址
+        discord.ui.TextDisplay(url),
         accent_color=0x5865F2,
     )
     view.add_item(container)
