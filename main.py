@@ -3609,7 +3609,84 @@ async def streaks(interaction: discord.Interaction, user: Optional[discord.Membe
     embed = view.build_personal_embed()
     await interaction.response.send_message(embed=embed, view=view)
 
+@bot.tree.command(name="seeemoji", description="Enlarge the emoji image and get it's URL")
+@app_commands.describe(emoji="Enter the emoji")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def seeemoji(interaction: discord.Interaction, emoji: str):
+    emoji = emoji.strip()
+    title = "Emoji"
+    url = None
 
+    # 自訂 emoji：<:name:id> / <a:name:id>
+    m = re.match(r"<(a?):([a-zA-Z0-9_]+):(\d+)>$", emoji)
+    if m:
+        animated, name, eid = m.groups()
+        ext = "gif" if animated else "png"
+        url = f"https://cdn.discordapp.com/emojis/{eid}.{ext}?size=4096&quality=lossless"
+        title = f":{name}:"
+    else:
+        # Unicode → Twemoji
+        try:
+            codepoints = "-".join(f"{ord(c):x}" for c in emoji if ord(c) != 0xfe0f)
+            if not codepoints:
+                raise ValueError("empty")
+            url = f"https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/{codepoints}.png"
+            title = emoji
+        except Exception:
+            return await interaction.response.send_message(
+                "❌ WTF is this? Try to paste on `<:name:id>` or select a emoji form your server",
+                ephemeral=True
+            )
+
+    # Components V2：Container 包 MediaGallery + 網址文字
+    view = discord.ui.LayoutView(timeout=None)
+    container = discord.ui.Container(
+        discord.ui.TextDisplay(f"**{title}**"),
+        discord.ui.MediaGallery(
+            discord.MediaGalleryItem(media=url, description=title)
+        ),
+        discord.ui.TextDisplay(url),  # 一行圖片網址
+        accent_color=0x5865F2,
+    )
+    view.add_item(container)
+    await interaction.response.send_message(view=view)
+
+@bot.tree.command(name="seesticker", description="Enlarge the latest sticker in this channel in a Container and show its URL")
+async def seesticker(interaction: discord.Interaction):
+    if not interaction.channel:
+        return await interaction.response.send_message("❌ Can't read message history here.", ephemeral=True)
+
+    await interaction.response.defer()
+
+    try:
+        # Only check the message right above (limit=1)
+        async for msg in interaction.channel.history(limit=1):
+            if not msg.stickers:
+                return await interaction.followup.send("❌ The message above has no sticker.")
+
+            sticker = msg.stickers[0]
+            url = getattr(sticker, "url", None) or f"https://media.discordapp.net/stickers/{sticker.id}.png?size=4096"
+            name = sticker.name or "Sticker"
+
+            view = discord.ui.LayoutView(timeout=None)
+            container = discord.ui.Container(
+                discord.ui.TextDisplay(f"**{name}**\nFrom {msg.author.mention} · [Jump to message]({msg.jump_url})"),
+                discord.ui.MediaGallery(
+                    discord.MediaGalleryItem(media=url, description=name)
+                ),
+                discord.ui.TextDisplay(url),
+                accent_color=0x5865F2,
+            )
+            view.add_item(container)
+            return await interaction.followup.send(view=view)
+
+        await interaction.followup.send("❌ No message found above.")
+    except discord.Forbidden:
+        await interaction.followup.send("❌ Bro I don't have permission to read message history in this channel.", ephemeral=True)
+    except Exception as e:
+        logger.error(f"[/seesticker error]: {e}")
+        await interaction.followup.send(f"❌ Sry, something went wrong: {e}", ephemeral=True)
 
 # =================================================================
 # 🔑 8. RUN BOT
