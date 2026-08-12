@@ -272,6 +272,16 @@ def init_db():
     """)
     # 🎯 加入伺服器時預先建立的 Webhook（給之後「發射台」架構備用）
     cursor.execute("CREATE TABLE IF NOT EXISTS guild_webhooks (guild_id TEXT PRIMARY KEY, webhook_url TEXT, channel_id TEXT)")
+    # 🔢 數數頻道
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS counting_settings (
+            guild_id TEXT PRIMARY KEY,
+            channel_id TEXT,
+            current_count INTEGER DEFAULT 0,
+            last_user_id TEXT,
+            mute_duration TEXT DEFAULT '10m'
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -818,7 +828,7 @@ class WelcomeConfigView(ui.View):
 
     @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=0)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
-        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nAuto Mute\nTime Message")
+        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message")
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=SettingsView(interaction.guild_id))
 
@@ -961,7 +971,7 @@ class LevelSettingsView(ui.View):
 
     @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=0)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
-        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nAuto Mute\nTime Message")
+        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message")
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=SettingsView(interaction.guild_id))
 
@@ -1144,7 +1154,7 @@ class AutoMuteConfigView(ui.View):
 
     @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=0)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
-        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nAuto Mute\nTime Message")
+        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message")
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=SettingsView(interaction.guild_id))
 
@@ -1263,7 +1273,7 @@ class TimeMessageConfigView(ui.View):
 
     @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=0)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
-        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nAuto Mute\nTime Message")
+        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message")
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=SettingsView(interaction.guild_id))
 
@@ -1470,7 +1480,7 @@ class StreaksMainView(ui.View):
 
     @ui.button(label="🔙 Back", style=discord.ButtonStyle.gray, row=0)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
-        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nAuto Mute\nTime Message")
+        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message")
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=SettingsView(interaction.guild_id))
 
@@ -1503,6 +1513,106 @@ class StreaksMainView(ui.View):
             color=0x2b2d31
         )
         await interaction.response.edit_message(embed=embed, view=StreaksRoleSettingsView(self))
+
+class CountingMuteDurationModal(ui.Modal, title="Set Mute Duration for Wrong Number"):
+    duration = ui.TextInput(label="Mute Duration (e.g., 1m, 10m, 1h, 2d)", default="10m", required=True)
+
+    def __init__(self, view: 'CountingConfigView'):
+        super().__init__()
+        self.view = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        _, err = parse_mute_duration(self.duration.value)
+        if err:
+            return await interaction.response.send_message(f"❌ {err}", ephemeral=True)
+
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO counting_settings (guild_id, mute_duration) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET mute_duration = excluded.mute_duration",
+            (str(interaction.guild_id), self.duration.value)
+        )
+        conn.commit(); conn.close()
+        new_view = CountingConfigView(interaction.guild_id)
+        await interaction.response.edit_message(embed=new_view.build_embed(interaction.guild), view=new_view)
+
+
+class CountingConfigView(ui.View):
+    def __init__(self, guild_id: int = None):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+        enabled = is_feature_enabled(guild_id, "counting") if guild_id else False
+        self.toggle_enabled.label = "✅ Status: On" if enabled else "❌ Status: Off"
+        self.toggle_enabled.style = discord.ButtonStyle.success if enabled else discord.ButtonStyle.danger
+
+        if not enabled:
+            self.remove_item(self.set_channel)
+            self.remove_item(self.set_mute_duration)
+            self.remove_item(self.reset_count)
+        elif guild_id:
+            conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+            cursor.execute("SELECT channel_id FROM counting_settings WHERE guild_id = ?", (str(guild_id),))
+            row = cursor.fetchone(); conn.close()
+            if row and row[0] and str(row[0]).isdigit():
+                self.set_channel.default_values = [discord.Object(id=int(row[0]))]
+
+    def build_embed(self, guild: discord.Guild) -> discord.Embed:
+        enabled = is_feature_enabled(self.guild_id, "counting")
+        embed = discord.Embed(title="🔢 Counting Channel Settings", color=0x3498db if enabled else 0x2b2d31)
+        if not enabled:
+            embed.description = "Status: **off**"
+        else:
+            conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+            cursor.execute("SELECT channel_id, current_count, mute_duration FROM counting_settings WHERE guild_id = ?", (str(self.guild_id),))
+            row = cursor.fetchone(); conn.close()
+            cid, count, dur = row if row else (None, 0, "10m")
+            ch_text = f"<#{cid}>" if cid else "Not set"
+            embed.description = (
+                f"Status: **on**\n"
+                f"Counting channel: {ch_text}\n"
+                f"Current count: **{count}**\n"
+                f"Mute duration if broken: **{dur}**"
+            )
+        embed.set_footer(text=f"{guild.name}｜67")
+        return embed
+
+    @ui.button(label="🔙 Back", style=discord.ButtonStyle.gray, row=0)
+    async def back(self, interaction: discord.Interaction, button: ui.Button):
+        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message")
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
+        await interaction.response.edit_message(embed=embed, view=SettingsView(interaction.guild_id))
+
+    @ui.button(label="❌ Status: Off", style=discord.ButtonStyle.danger, row=0)
+    async def toggle_enabled(self, interaction: discord.Interaction, button: ui.Button):
+        cur = is_feature_enabled(self.guild_id, "counting")
+        set_feature_enabled(self.guild_id, "counting", not cur)
+        new_view = CountingConfigView(interaction.guild_id)
+        await interaction.response.edit_message(embed=new_view.build_embed(interaction.guild), view=new_view)
+
+    @ui.select(cls=ui.ChannelSelect, channel_types=[discord.ChannelType.text], placeholder="🎯 Select Counting Channel", row=1)
+    async def set_channel(self, interaction: discord.Interaction, select: ui.ChannelSelect):
+        cid = select.values[0].id
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO counting_settings (guild_id, channel_id, current_count, last_user_id) VALUES (?, ?, 0, NULL) "
+            "ON CONFLICT(guild_id) DO UPDATE SET channel_id = excluded.channel_id, current_count = 0, last_user_id = NULL",
+            (str(interaction.guild_id), str(cid))
+        )
+        conn.commit(); conn.close()
+        new_view = CountingConfigView(interaction.guild_id)
+        await interaction.response.edit_message(embed=new_view.build_embed(interaction.guild), view=new_view)
+
+    @ui.button(label="⏱️ Mute Duration", style=discord.ButtonStyle.blurple, row=2)
+    async def set_mute_duration(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_modal(CountingMuteDurationModal(self))
+
+    @ui.button(label="🔄 Reset Count", style=discord.ButtonStyle.secondary, row=2)
+    async def reset_count(self, interaction: discord.Interaction, button: ui.Button):
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute("UPDATE counting_settings SET current_count = 0, last_user_id = NULL WHERE guild_id = ?", (str(interaction.guild_id),))
+        conn.commit(); conn.close()
+        new_view = CountingConfigView(interaction.guild_id)
+        await interaction.response.edit_message(embed=new_view.build_embed(interaction.guild), view=new_view)
 
 class SettingsView(ui.View):
     def __init__(self, guild_id: int = None):
@@ -1543,6 +1653,12 @@ class SettingsView(ui.View):
         embed = view.build_embed(interaction.guild)
         await interaction.response.edit_message(embed=embed, view=view)
 
+    @ui.button(label="Counting", style=discord.ButtonStyle.secondary, emoji="🔢")
+    async def btn_c(self, interaction: discord.Interaction, btn: ui.Button):
+        view = CountingConfigView(interaction.guild_id)
+        embed = view.build_embed(interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=view)
+
     @ui.button(label="✅ Auto Reply: On", style=discord.ButtonStyle.success, emoji="🔁")
     async def btn_autoreply(self, interaction: discord.Interaction, btn: ui.Button):
         currently_on = is_autoreply_enabled(interaction.guild_id)
@@ -1575,7 +1691,7 @@ async def help_cmd(interaction: discord.Interaction):
 @bot.tree.command(name="settings", description="Open bot configuration hub")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def settings(interaction: discord.Interaction):
-    embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nAuto Mute\nTime Message")
+    embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message")
     embed.set_footer(text=f"{interaction.guild.name}｜67")
     await interaction.response.send_message(embed=embed, view=SettingsView(interaction.guild_id))
 
@@ -3374,7 +3490,6 @@ async def on_message(message: discord.Message):
             # 確保無論成功或發生異常，都會將任務從全域追蹤清單中移除
             if 'active_ai_tasks' in globals() and message.id in globals()['active_ai_tasks']:
                 globals()['active_ai_tasks'].pop(message.id, None)
-
     # 🎯 以下都是伺服器限定功能（自動禁言、67 統計、等級、Streaks），私訊沒有 guild，到此為止
     if not message.guild:
         return
@@ -3388,7 +3503,71 @@ async def on_message(message: discord.Message):
 
     gid = str(message.guild.id)
     uid = str(message.author.id)
-    
+
+    # =================================================================
+    # 🔢 數數頻道（獨立處理，命中這個頻道就不繼續往下跑 67 統計/等級/Streaks，直接 return）
+    # =================================================================
+    if is_feature_enabled(gid, "counting"):
+        cursor.execute("SELECT channel_id, current_count, last_user_id, mute_duration FROM counting_settings WHERE guild_id = ?", (gid,))
+        c_row = cursor.fetchone()
+        if c_row and c_row[0] and str(c_row[0]) == str(message.channel.id):
+            _, current_count, last_user_id, mute_dur = c_row
+            content = message.content.strip()
+            is_admin = message.author.guild_permissions.administrator if isinstance(message.author, discord.Member) else False
+
+            if not content.isdigit():
+                # 🎯 非數字：管理員可以正常發，其他人一律刪除、不影響計數
+                if not is_admin:
+                    try:
+                        await message.delete()
+                    except discord.Forbidden:
+                        logger.error(f"[Counting] 沒有權限刪除 {message.author} 在 {message.guild.name} 的非數字訊息")
+                    except discord.NotFound:
+                        pass
+                conn.close()
+                return
+
+            number = int(content)
+            expected = current_count + 1
+
+            if number == expected and str(message.author.id) != str(last_user_id):
+                # ✅ 數對了，而且不是同一個人連續兩次數
+                try:
+                    await message.add_reaction("✅")
+                except discord.Forbidden:
+                    pass
+                cursor.execute(
+                    "UPDATE counting_settings SET current_count = ?, last_user_id = ? WHERE guild_id = ?",
+                    (number, str(message.author.id), gid)
+                )
+                conn.commit()
+            else:
+                # ❌ 數錯了，或同一個人連續兩次數：重置 + 禁言
+                reason = "connected two numbers in a row" if str(message.author.id) == str(last_user_id) and number == expected else f"wrong number (expected {expected})"
+                try:
+                    await message.add_reaction("❌")
+                except discord.Forbidden:
+                    pass
+                cursor.execute(
+                    "UPDATE counting_settings SET current_count = 0, last_user_id = NULL WHERE guild_id = ?",
+                    (gid,)
+                )
+                conn.commit()
+
+                delta, _ = parse_mute_duration(mute_dur or "10m")
+                try:
+                    await message.author.timeout(delta or datetime.timedelta(minutes=10), reason=f"Broke the counting channel: {reason}")
+                except discord.Forbidden:
+                    logger.error(f"[Counting] 沒有權限禁言 {message.author} in {message.guild.name}")
+
+                try:
+                    await message.channel.send(f"💥 {message.author.mention} broke the count at **{number}** ({reason})! Count reset to **0**, starting from **1**.")
+                except Exception as e:
+                    logger.error(f"[Counting 重置訊息發送失敗]: {e}")
+
+            conn.close()
+            return  # 🎯 數數頻道的訊息不再繼續往下跑 67 統計、等級、Streaks
+
     # =================================================================
     # 6️⃣7️⃣ 2. 檢查 "67" 關鍵字與次數統計（修復：排除網址）
     # =================================================================
