@@ -282,6 +282,18 @@ def init_db():
             mute_duration TEXT DEFAULT '10m'
         )
     """)
+    # 📊 Server Stats 語音頻道
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS server_stats (
+            guild_id TEXT PRIMARY KEY,
+            category_id TEXT,
+            all_members_id TEXT,
+            members_id TEXT,
+            bots_id TEXT,
+            bans_id TEXT,
+            mutes_id TEXT
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -499,6 +511,72 @@ def parse_mute_duration(duration_str: str):
     if delta > datetime.timedelta(days=14): return None, "Max duration is 14 days."
     return delta, None
 
+def _stat_channel_name(current_name: str, count: int) -> str:
+    """只改名稱結尾的數字，前面管理員怎麼改都保留。"""
+    m = re.search(r"^(.*?)(\d+)\s*$", current_name or "")
+    if m:
+        return f"{m.group(1)}{count}"
+    return f"{current_name} {count}" if current_name else str(count)
+
+
+async def update_server_stats(guild: discord.Guild):
+    """依 DB 紀錄更新該伺服器的 stats 語音頻道名稱；頻道被刪就不報錯。"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT category_id, all_members_id, members_id, bots_id, bans_id, mutes_id "
+        "FROM server_stats WHERE guild_id = ?",
+        (str(guild.id),)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return
+
+    _, all_id, mem_id, bot_id, ban_id, mute_id = row
+
+    total = guild.member_count or len(guild.members)
+    humans = sum(1 for m in guild.members if not m.bot)
+    bots = sum(1 for m in guild.members if m.bot)
+
+    # Mutes：目前仍在 timeout 的人
+    now = discord.utils.utcnow()
+    mutes = sum(
+        1 for m in guild.members
+        if m.timed_out_until and m.timed_out_until > now
+    )
+
+    # Bans：需要 Ban Members 權限；失敗就跳過不改
+    bans = None
+    try:
+        bans = 0
+        async for _ in guild.bans(limit=None):
+            bans += 1
+    except (discord.Forbidden, discord.HTTPException):
+        bans = None
+
+    id_to_count = {
+        all_id: total,
+        mem_id: humans,
+        bot_id: bots,
+        mute_id: mutes,
+    }
+    if bans is not None:
+        id_to_count[ban_id] = bans
+
+    for cid, count in id_to_count.items():
+        if not cid:
+            continue
+        ch = guild.get_channel(int(cid))
+        if ch is None:
+            continue  # 管理員刪了頻道 → 安靜跳過
+        new_name = _stat_channel_name(ch.name, count)
+        if new_name != ch.name:
+            try:
+                await ch.edit(name=new_name, reason="Server stats update")
+            except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+                pass
+
 AUTOMOD_RULE_PREFIX = "67bot-automute-"
 MAX_AUTOMOD_KEYWORD_RULES = 6
 
@@ -609,6 +687,7 @@ class SixSevenBot(commands.Bot):
     async def setup_hook(self):
         self.rotate_status.start()
         self.check_time_announcements.start()
+        self.update_server_stats_task.start()
         self.add_view(MusicControlView())  # 🎯 讓控制面板按鈕重啟後依然有效
         await self.tree.sync()
         
@@ -635,6 +714,15 @@ class SixSevenBot(commands.Bot):
                 channel = self.get_channel(int(cid)) or await self.fetch_channel(int(cid))
                 if channel and is_feature_enabled(channel.guild.id, "timemsg"):
                     await channel.send(msg)
+
+    @tasks.loop(minutes=5)
+    async def update_server_stats_task(self):
+        await self.wait_until_ready()
+        for guild in self.guilds:
+            try:
+                await update_server_stats(guild)
+            except Exception as e:
+                logger.error(f"[Server Stats] guild={guild.id}: {e}")
 
 bot = SixSevenBot()
 
@@ -2091,6 +2179,99 @@ async def random67(interaction: discord.Interaction, language: Literal["English"
             selected = random.choice(relatives_zh)
 
     await interaction.response.send_message(selected)
+
+@bot.tree.command(name="setserverstats", description="Create a SERVER STATS category with live member/bot/ban/mute voice channels")
+@app_commands.checks.has_permissions(administrator=True)
+async def setserverstats(interaction: discord.Interaction):
+    guild = interaction.guild
+    if not guild:
+        return await interaction.response.send_message("❌ Guild only.", ephemeral=True)
+
+    me = guild.me
+    if not me or not me.guild_permissions.manage_channels:
+        return await interaction.response.send_message(
+            "❌ I need **Manage Channels** permission.", ephemeral=True
+        )
+
+    await interaction.response.defer(ephemeral=True)
+
+    # 已存在就先清掉舊紀錄對應的頻道（可選：不刪，直接重建覆蓋）
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT category_id, all_members_id, members_id, bots_id, bans_id, mutes_id FROM server_stats WHERE guild_id = ?", (str(guild.id),))
+    old = cursor.fetchone()
+    if old:
+        for cid in old:
+            if not cid:
+                continue
+            ch = guild.get_channel(int(cid))
+            if ch:
+                try:
+                    await ch.delete(reason="Recreate server stats")
+                except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+                    pass
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True),
+        me: discord.PermissionOverwrite(connect=True, manage_channels=True, view_channel=True),
+    }
+
+    try:
+        category = await guild.create_category(
+            "📊 SERVER STATS 📊",
+            overwrites=overwrites,
+            reason="Server stats setup",
+        )
+
+        total = guild.member_count or len(guild.members)
+        humans = sum(1 for m in guild.members if not m.bot)
+        bots = sum(1 for m in guild.members if m.bot)
+        now = discord.utils.utcnow()
+        mutes = sum(1 for m in guild.members if m.timed_out_until and m.timed_out_until > now)
+
+        bans = 0
+        try:
+            async for _ in guild.bans(limit=None):
+                bans += 1
+        except (discord.Forbidden, discord.HTTPException):
+            bans = 0
+
+        ch_all = await category.create_voice_channel(f"All Members: {total}", overwrites=overwrites)
+        ch_mem = await category.create_voice_channel(f"Members: {humans}", overwrites=overwrites)
+        ch_bot = await category.create_voice_channel(f"Bots: {bots}", overwrites=overwrites)
+        ch_ban = await category.create_voice_channel(f"Bans: {bans}", overwrites=overwrites)
+        ch_mute = await category.create_voice_channel(f"Mutes: {mutes}", overwrites=overwrites)
+
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO server_stats
+            (guild_id, category_id, all_members_id, members_id, bots_id, bans_id, mutes_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(guild.id),
+                str(category.id),
+                str(ch_all.id),
+                str(ch_mem.id),
+                str(ch_bot.id),
+                str(ch_ban.id),
+                str(ch_mute.id),
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        await interaction.followup.send(
+            f"✅ Server stats created under **{category.name}**.\n"
+            f"Names update every 5 minutes (only the number is changed; you can rename the prefix).\n"
+            f"Deleting any channel is fine — missing channels are skipped silently.",
+            ephemeral=True,
+        )
+    except Exception as e:
+        conn.close()
+        logger.error(f"[/setserverstats] {e}")
+        await interaction.followup.send(f"❌ Failed: {e}", ephemeral=True)
+        
 # =================================================================
 # 💰 ECONOMY SYSTEM COMMANDS & VIEWS (對應圖 {696E6907-11CB-4468-B5BB-9C2678E2F7F2}.png)
 # =================================================================
