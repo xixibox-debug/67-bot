@@ -3062,24 +3062,44 @@ async def queue_cmd(interaction: discord.Interaction):
 @app_commands.checks.has_permissions(administrator=True)
 async def addrole(interaction: discord.Interaction, user: discord.Member, role: discord.Role):
     if role in user.roles:
-        return await interaction.response.send_message(f"❌ {user.mention} already owned {role.name}.", ephemeral=True)
+        return await interaction.response.send_message(
+            f"❌ {user.mention} already has **{role.name}**.", ephemeral=True
+        )
+
+    await interaction.response.defer(ephemeral=True)
     try:
-        await user.add_roles(role)
-        await interaction.response.send_message(f"✅ Give role {role.mention} to {user.mention}.", ephemeral=True)
+        await user.add_roles(role, reason=f"Added by {interaction.user}")
+        await interaction.followup.send(
+            f"✅ Gave {role.mention} to {user.mention}.", ephemeral=True
+        )
     except discord.Forbidden:
-        await interaction.response.send_message("❌ Called the moderator to give me a higher permission.", ephemeral=True)
+        await interaction.followup.send(
+            "❌ I can't manage that role (role hierarchy / missing permissions).", ephemeral=True
+        )
+    except Exception as e:
+        await interaction.followup.send(f"❌ Failed: {e}", ephemeral=True)
+
 
 @bot.tree.command(name="removerole", description="Manually remove a role from a user")
 @app_commands.checks.has_permissions(administrator=True)
 async def removerole(interaction: discord.Interaction, user: discord.Member, role: discord.Role):
     if role not in user.roles:
-        return await interaction.response.send_message(f"❌ {user.mention} don't have **{role.name}**. ", ephemeral=True)
-    try:
-        await user.remove_roles(role)
-        await interaction.response.send_message(f"✅ Remove {user.mention}'s **{role.mention} **.", ephemeral=True)
-    except discord.Forbidden:
-        await interaction.response.send_message("❌ Called the moderator to give me a higher permission.", ephemeral=True)
+        return await interaction.response.send_message(
+            f"❌ {user.mention} doesn't have **{role.name}**.", ephemeral=True
+        )
 
+    await interaction.response.defer(ephemeral=True)
+    try:
+        await user.remove_roles(role, reason=f"Removed by {interaction.user}")
+        await interaction.followup.send(
+            f"✅ Removed {role.mention} from {user.mention}.", ephemeral=True
+        )
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "❌ I can't manage that role (role hierarchy / missing permissions).", ephemeral=True
+        )
+    except Exception as e:
+        await interaction.followup.send(f"❌ Failed: {e}", ephemeral=True)
 @bot.tree.command(name="setstreaks", description="Flooding or reducing the number of Streaks days.")
 @app_commands.checks.has_permissions(administrator=True)
 @app_commands.describe(user="Users who are subject to spam or have their Streaks days reduced.", streaks="Set Streaks days. (>=0)")
