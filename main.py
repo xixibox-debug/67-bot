@@ -78,6 +78,12 @@ voice_sessions = {}
 MAX_VOICE_WATCH = 20  # 全機器人同時間最多監聽 5 個語音頻道
 voice_keepalive_tasks = {}  # 🎯 guild_id -> asyncio.Task，避免語音連線因為完全沒有音訊流量被 Discord 判定閒置斷線
 
+counting_locks = {}  # guild_id -> asyncio.Lock，確保同一伺服器的數數判斷一次只處理一則訊息，避免競速條件
+
+def get_counting_lock(guild_id) -> asyncio.Lock:
+    if guild_id not in counting_locks:
+        counting_locks[guild_id] = asyncio.Lock()
+    return counting_locks[guild_id]
 
 async def start_voice_keepalive(guild_id: int, voice_client: discord.VoiceClient):
     """啟動（或重啟）指定伺服器的語音保活任務"""
@@ -502,8 +508,11 @@ def parse_placeholders(text: str, member: discord.Member, guild: discord.Guild, 
     return text
 
 def parse_mute_duration(duration_str: str):
-    match = re.match(r"^(\d+)([mhd])$", duration_str.strip().lower())
-    if not match: return None, "Invalid format! Use 1m, 3m, 1h, or 2d."
+    cleaned = duration_str.strip().lower()
+    if cleaned in ("0", "none", "off"):
+        return None, None  # 🎯 特殊值：代表「不禁言」，不是錯誤，回傳 (None, None) 讓呼叫端自行判斷
+    match = re.match(r"^(\d+)([mhd])$", cleaned)
+    if not match: return None, "Invalid format! Use 1m, 3m, 1h, 2d, or 0/none to disable muting."
     amount, unit = int(match.group(1)), match.group(2)
     if unit == 'm': delta = datetime.timedelta(minutes=amount)
     elif unit == 'h': delta = datetime.timedelta(hours=amount)
@@ -1603,7 +1612,7 @@ class StreaksMainView(ui.View):
         await interaction.response.edit_message(embed=embed, view=StreaksRoleSettingsView(self))
 
 class CountingMuteDurationModal(ui.Modal, title="Set Mute Duration for Wrong Number"):
-    duration = ui.TextInput(label="Mute Duration (e.g., 1m, 10m, 1h, 2d)", default="10m", required=True)
+    duration = ui.TextInput(label="Duration, or 0/none to disable muting", default="10m", required=True)
 
     def __init__(self, view: 'CountingConfigView'):
         super().__init__()
@@ -1648,18 +1657,20 @@ class CountingConfigView(ui.View):
         enabled = is_feature_enabled(self.guild_id, "counting")
         embed = discord.Embed(title="🔢 Counting Channel Settings", color=0x3498db if enabled else 0x2b2d31)
         if not enabled:
-            embed.description = "Status: **off**"
+            embed.description = "Status: **`off`**"
         else:
             conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
             cursor.execute("SELECT channel_id, current_count, mute_duration FROM counting_settings WHERE guild_id = ?", (str(self.guild_id),))
             row = cursor.fetchone(); conn.close()
             cid, count, dur = row if row else (None, 0, "10m")
             ch_text = f"<#{cid}>" if cid else "Not set"
+            dur_text = "Disabled (no mute)" if (dur or "").lower() in ("0", "none", "off") else dur
             embed.description = (
-                f"Status: **on**\n"
+                f"Status: **`on`**\n"
                 f"Counting channel: {ch_text}\n"
-                f"Current count: **{count}**\n"
-                f"Mute duration if broken: **{dur}**"
+                f"Current count: **`{count}`**\n"
+                f"Mute duration if broken: **`{dur_text}`**"
+            )
             )
         embed.set_footer(text=f"{guild.name}｜67")
         return embed
@@ -3476,8 +3487,15 @@ async def on_message(message: discord.Message):
         # 🧹 拔除訊息中的機器人標籤與前後空格
         clean_content = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
 
-        # 狀況 A：如果後面「沒有加任何文字」 -> 觸發原本的極度厭世英文回覆
-        if not clean_content:
+        # 🖼️ 檢查有沒有附帶圖片（附件本身是圖片，或圖片以連結形式貼上都算）
+        image_url = None
+        for att in message.attachments:
+            if att.content_type and att.content_type.startswith("image/"):
+                image_url = att.url
+                break
+
+        # 狀況 A：完全沒有文字、也沒有圖片 -> 觸發原本的極度厭世英文回覆
+        if not clean_content and not image_url:
             annoyed_phrases = [
                 "Why are you even pinging me? Go away.",
                 "Don't @ me for no reason. I'm exhausted.",
@@ -3487,6 +3505,10 @@ async def on_message(message: discord.Message):
             ]
             await message.reply(random.choice(annoyed_phrases))
             return
+
+        # 🖼️ 只有圖片、沒有文字的話，給一個預設提示詞，讓 AI 知道要做什麼
+        if not clean_content and image_url:
+            clean_content = "What's in this image?"
 
         # 狀況 B：後面有字 -> 限制檢查並呼叫 Groq
         word_count = len(clean_content.split())
@@ -3572,7 +3594,16 @@ async def on_message(message: discord.Message):
                     }
                 ]
                 ai_messages.extend(conversation_history)
-                ai_messages.append({"role": "user", "content": clean_content})
+                if image_url:
+                    ai_messages.append({
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": clean_content},
+                            {"type": "image_url", "image_url": {"url": image_url}}
+                        ]
+                    })
+                else:
+                    ai_messages.append({"role": "user", "content": clean_content})
 
                 ai_reply = None
                 
@@ -3604,7 +3635,16 @@ async def on_message(message: discord.Message):
                                 }
                             ]
                             kimi_messages.extend(conversation_history)
-                            kimi_messages.append({"role": "user", "content": clean_content})
+                            if image_url:
+                                kimi_messages.append({
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "text", "text": clean_content},
+                                        {"type": "image_url", "image_url": {"url": image_url}}
+                                    ]
+                                })
+                            else:
+                                kimi_messages.append({"role": "user", "content": clean_content})
                 
                             kimi_response = await kimi_client.chat.completions.create(
                                 model="kimi-k3",          # 可改成 kimi-k2.6 / kimi-k3，看你要的性價比
@@ -3709,10 +3749,9 @@ async def on_message(message: discord.Message):
     # 🔢 數數頻道（獨立處理，命中這個頻道就不繼續往下跑 67 統計/等級/Streaks，直接 return）
     # =================================================================
     if is_feature_enabled(gid, "counting"):
-        cursor.execute("SELECT channel_id, current_count, last_user_id, mute_duration FROM counting_settings WHERE guild_id = ?", (gid,))
+        cursor.execute("SELECT channel_id FROM counting_settings WHERE guild_id = ?", (gid,))
         c_row = cursor.fetchone()
         if c_row and c_row[0] and str(c_row[0]) == str(message.channel.id):
-            _, current_count, last_user_id, mute_dur = c_row
             content = message.content.strip()
             is_admin = message.author.guild_permissions.administrator if isinstance(message.author, discord.Member) else False
 
@@ -3728,43 +3767,53 @@ async def on_message(message: discord.Message):
                 conn.close()
                 return
 
-            number = int(content)
-            expected = current_count + 1
+            # 🎯 用鎖把「讀取現況 -> 判斷 -> 寫回資料庫」整段包起來，強制同一伺服器一次只處理一則，
+            # 避免使用者打字太快、兩則訊息同時處理時互相讀到還沒更新的舊資料
+            async with get_counting_lock(message.guild.id):
+                # 進鎖之後才重新查一次最新狀態（不能沿用進鎖前查到的舊資料）
+                cursor.execute("SELECT current_count, last_user_id, mute_duration FROM counting_settings WHERE guild_id = ?", (gid,))
+                s_row = cursor.fetchone()
+                current_count, last_user_id, mute_dur = s_row if s_row else (0, None, "10m")
 
-            if number == expected and str(message.author.id) != str(last_user_id):
-                # ✅ 數對了，而且不是同一個人連續兩次數
-                try:
-                    await message.add_reaction("✅")
-                except discord.Forbidden:
-                    pass
-                cursor.execute(
-                    "UPDATE counting_settings SET current_count = ?, last_user_id = ? WHERE guild_id = ?",
-                    (number, str(message.author.id), gid)
-                )
-                conn.commit()
-            else:
-                # ❌ 數錯了，或同一個人連續兩次數：重置 + 禁言
-                reason = "connected two numbers in a row" if str(message.author.id) == str(last_user_id) and number == expected else f"wrong number (expected {expected})"
-                try:
-                    await message.add_reaction("❌")
-                except discord.Forbidden:
-                    pass
-                cursor.execute(
-                    "UPDATE counting_settings SET current_count = 0, last_user_id = NULL WHERE guild_id = ?",
-                    (gid,)
-                )
-                conn.commit()
+                number = int(content)
+                expected = current_count + 1
 
-                delta, _ = parse_mute_duration(mute_dur or "10m")
-                try:
-                    await message.author.timeout(delta or datetime.timedelta(minutes=10), reason=f"Broke the counting channel: {reason}")
-                except discord.Forbidden:
-                    logger.error(f"[Counting] 沒有權限禁言 {message.author} in {message.guild.name}")
+                if number == expected and str(message.author.id) != str(last_user_id):
+                    # ✅ 數對了，而且不是同一個人連續兩次數
+                    cursor.execute(
+                        "UPDATE counting_settings SET current_count = ?, last_user_id = ? WHERE guild_id = ?",
+                        (number, str(message.author.id), gid)
+                    )
+                    conn.commit()
+                    try:
+                        await message.add_reaction("✅")
+                    except discord.Forbidden:
+                        pass
+                else:
+                    # ❌ 數錯了，或同一個人連續兩次數：重置 + （視設定）禁言
+                    reason = "connected two numbers in a row" if str(message.author.id) == str(last_user_id) and number == expected else f"wrong number (expected {expected})"
+                    cursor.execute(
+                        "UPDATE counting_settings SET current_count = 0, last_user_id = NULL WHERE guild_id = ?",
+                        (gid,)
+                    )
+                    conn.commit()
 
-                try:
-                    await message.channel.send(f"💥 {message.author.mention} broke the count at **{number}** ({reason})! Count reset to **0**, starting from **1**.")
-                except Exception as e:
-                    logger.error(f"[Counting 重置訊息發送失敗]: {e}")
+                    try:
+                        await message.add_reaction("❌")
+                    except discord.Forbidden:
+                        pass
+
+                    delta, _ = parse_mute_duration(mute_dur or "10m")
+                    if delta:  # 🎯 delta 是 None 代表設定成 0/none，不禁言
+                        try:
+                            await message.author.timeout(delta, reason=f"Broke the counting channel: {reason}")
+                        except discord.Forbidden:
+                            logger.error(f"[Counting] 沒有權限禁言 {message.author} in {message.guild.name}")
+
+                    try:
+                        await message.channel.send(f"💥 {message.author.mention} broke the count at **{number}** ({reason})! Count reset to **0**, starting from **1**.")
+                    except Exception as e:
+                        logger.error(f"[Counting 重置訊息發送失敗]: {e}")
 
             conn.close()
             return  # 🎯 數數頻道的訊息不再繼續往下跑 67 統計、等級、Streaks
@@ -4021,26 +4070,83 @@ async def seeemoji(interaction: discord.Interaction, emoji: str):
     view.add_item(container)
     await interaction.response.send_message(view=view)
 
-@bot.tree.command(name="seesticker", description="Enlarge the latest sticker in this channel in a Container and show its URL")
+@bot.tree.command(name="seesticker", description="Enlarge the latest sticker or image from the message above")
 async def seesticker(interaction: discord.Interaction):
     if not interaction.channel:
         return await interaction.response.send_message("❌ Can't read message history here.", ephemeral=True)
 
     await interaction.response.defer()
 
-    try:
-        # Only check the message right above (limit=1)
-        async for msg in interaction.channel.history(limit=1):
-            if not msg.stickers:
-                return await interaction.followup.send("❌ The message above has no sticker.")
+    def sticker_url(sticker) -> str:
+        # StickerItem / Sticker 都盡量用官方 url；不行再依 format 組 CDN
+        url = getattr(sticker, "url", None)
+        if url:
+            return str(url)
 
-            sticker = msg.stickers[0]
-            url = getattr(sticker, "url", None) or f"https://media.discordapp.net/stickers/{sticker.id}.png?size=4096"
-            name = sticker.name or "Sticker"
+        sid = sticker.id
+        fmt = getattr(sticker, "format", None)
+        # 1=png, 2=apng, 3=lottie, 4=gif
+        fmt_value = getattr(fmt, "value", fmt)
+        if fmt_value == 4:  # gif
+            return f"https://media.discordapp.net/stickers/{sid}.gif?size=4096"
+        if fmt_value == 3:  # lottie（畫廊不一定播得了，仍給 json 連結）
+            return f"https://discord.com/stickers/{sid}.json"
+        # png / apng / 預設
+        return f"https://media.discordapp.net/stickers/{sid}.png?size=4096"
+
+    try:
+        async for raw in interaction.channel.history(limit=1):
+            # 重抓一次，避免 history 回傳的 sticker 資料不完整
+            try:
+                msg = await interaction.channel.fetch_message(raw.id)
+            except (discord.NotFound, discord.HTTPException):
+                msg = raw
+
+            url = None
+            name = None
+
+            # 1) Discord 貼圖
+            if msg.stickers:
+                sticker = msg.stickers[0]
+                url = sticker_url(sticker)
+                name = getattr(sticker, "name", None) or "Sticker"
+
+            # 2) 沒貼圖才退回附件圖片
+            if not url:
+                for att in msg.attachments:
+                    if (att.content_type and att.content_type.startswith("image/")) or att.filename.lower().endswith(
+                        (".png", ".jpg", ".jpeg", ".gif", ".webp")
+                    ):
+                        url = att.url
+                        name = att.filename or "Image"
+                        break
+
+            if not url:
+                for emb in msg.embeds:
+                    if emb.image and emb.image.url:
+                        url = emb.image.url
+                        name = "Image"
+                        break
+                    if emb.thumbnail and emb.thumbnail.url:
+                        url = emb.thumbnail.url
+                        name = "Image"
+                        break
+
+            if not url:
+                # 除錯用：看 bot 實際讀到什麼
+                logger.warning(
+                    f"[/seesticker] msg={msg.id} stickers={len(msg.stickers)} "
+                    f"attachments={len(msg.attachments)} embeds={len(msg.embeds)}"
+                )
+                return await interaction.followup.send(
+                    "❌ The message above has no sticker or image."
+                )
 
             view = discord.ui.LayoutView(timeout=None)
             container = discord.ui.Container(
-                discord.ui.TextDisplay(f"**{name}**\nFrom {msg.author.mention} · [Jump to message]({msg.jump_url})"),
+                discord.ui.TextDisplay(
+                    f"**{name}**\nFrom {msg.author.mention} · [Jump to message]({msg.jump_url})"
+                ),
                 discord.ui.MediaGallery(
                     discord.MediaGalleryItem(media=url, description=name)
                 ),
@@ -4052,7 +4158,10 @@ async def seesticker(interaction: discord.Interaction):
 
         await interaction.followup.send("❌ No message found above.")
     except discord.Forbidden:
-        await interaction.followup.send("❌ Bro I don't have permission to read message history in this channel.", ephemeral=True)
+        await interaction.followup.send(
+            "❌ Bro I don't have permission to read message history in this channel.",
+            ephemeral=True,
+        )
     except Exception as e:
         logger.error(f"[/seesticker error]: {e}")
         await interaction.followup.send(f"❌ Sry, something went wrong: {e}", ephemeral=True)
