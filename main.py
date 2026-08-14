@@ -1671,7 +1671,6 @@ class CountingConfigView(ui.View):
                 f"Current count: **`{count}`**\n"
                 f"Mute duration if broken: **`{dur_text}`**"
             )
-            )
         embed.set_footer(text=f"{guild.name}｜67")
         return embed
 
