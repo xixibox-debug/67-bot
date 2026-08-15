@@ -9,6 +9,7 @@ import logging
 import os
 import random
 import re
+import json
 import sqlite3
 import aiohttp
 import asyncio
@@ -70,6 +71,223 @@ POLITICAL_KEYWORDS = [
 def is_political_topic(text: str) -> bool:
     lowered = text.lower()
     return any(kw.lower() in lowered for kw in POLITICAL_KEYWORDS)
+
+# =================================================================
+# 🕵️ 67+Agent：AI 可呼叫的管理工具
+# =================================================================
+AGENT_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "mute_member",
+            "description": "Timeout (mute) a member in this server. Only call this when the user CLEARLY and explicitly asks to mute/timeout someone.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "The Discord user ID or mention (e.g. <@123456789012345678>) of the member to mute."},
+                    "duration": {"type": "string", "description": "Mute duration like '10m', '1h', '2d'. Default '10m' if not specified."},
+                    "reason": {"type": "string", "description": "Reason for the mute."}
+                },
+                "required": ["user_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "kick_member",
+            "description": "Kick a member from this server. Only call this when the user CLEARLY and explicitly asks to kick someone.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "The Discord user ID or mention of the member to kick."},
+                    "reason": {"type": "string", "description": "Reason for the kick."}
+                },
+                "required": ["user_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ban_member",
+            "description": "Ban a member from this server. Only call this when the user CLEARLY and explicitly asks to ban someone.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "The Discord user ID or mention of the member to ban."},
+                    "reason": {"type": "string", "description": "Reason for the ban."}
+                },
+                "required": ["user_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "warn_member",
+            "description": "Send a warning to a member (posted in the channel and DMed to them). Only call this when the user CLEARLY and explicitly asks to warn someone.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "The Discord user ID or mention of the member to warn."},
+                    "warn_message": {"type": "string", "description": "The warning message content."}
+                },
+                "required": ["user_id", "warn_message"]
+            }
+        }
+    },
+]
+
+
+def _resolve_target_id(raw: str) -> str | None:
+    raw = str(raw).strip()
+    m = re.match(r"^<@!?(\d+)>$", raw)
+    if m:
+        return m.group(1)
+    return raw if raw.isdigit() else None
+
+
+async def execute_agent_tool(tool_name: str, args: dict, invoker: discord.Member, guild: discord.Guild) -> tuple:
+    """執行 Agent 決定呼叫的工具，回傳 (embed 或 None, 錯誤訊息或 None)。一律用 invoker 本人的權限驗證。"""
+    target_id = _resolve_target_id(args.get("user_id", ""))
+    if not target_id:
+        return None, "❌ Agent couldn't figure out who you meant. Please @ mention the target member clearly."
+
+    target = guild.get_member(int(target_id))
+    if not target:
+        return None, "❌ That user isn't in this server."
+    if target.id == invoker.id:
+        return None, "❌ You can't target yourself."
+    if target.id == bot.user.id:
+        return None, "❌ You can't target me."
+    if target.id == guild.owner_id:
+        return None, "❌ Bro don't do that. I don't wnat to be fired."
+
+    bot_member = guild.me
+
+    if tool_name == "mute_member":
+        if not invoker.guild_permissions.moderate_members:
+            return None, "❌ You don't have permission to timeout members."
+        duration_str = args.get("duration") or "10m"
+        delta, err = parse_mute_duration(duration_str)
+        if err:
+            return None, f"❌ {err}"
+        if target.top_role >= bot_member.top_role:
+            return None, f"❌ I can't mute **{target.display_name}**, their role is higher than or equal to mine."
+        reason = args.get("reason") or "None"
+        try:
+            if delta:
+                await target.timeout(delta, reason=reason)
+            embed = discord.Embed(
+                title=parse_placeholders("✅ {user.name} has been muted.", target, guild),
+                color=0x2ecc71,
+                description=f"Time: {duration_str}\nReason: {reason}"
+            )
+            embed.set_footer(text=f"{guild.name}｜67")
+            return embed, None
+        except discord.Forbidden:
+            return None, "❌ Call any moderator to give me a higher privileges."
+
+    elif tool_name == "kick_member":
+        if not invoker.guild_permissions.kick_members:
+            return None, "❌ You don't have permission to kick members."
+        if target.top_role >= bot_member.top_role:
+            return None, f"❌ I can't kick **{target.display_name}**, their role is higher than or equal to mine."
+        reason = args.get("reason") or "None"
+        try:
+            await target.kick(reason=reason)
+            await send_goodbye_message(target, guild)
+            embed = discord.Embed(title=parse_placeholders("✅ {user.name} has been kicked.", target, guild), color=0xe74c3c, description=parse_placeholders("Reason: {reason}", target, guild, extra={"reason": reason}))
+            embed.set_footer(text=f"{guild.name}｜67")
+            return embed, None
+        except discord.Forbidden:
+            return None, "❌ Call any moderator to give me a higher privileges."
+
+    elif tool_name == "ban_member":
+        if not invoker.guild_permissions.ban_members:
+            return None, "❌ You don't have permission to ban members."
+        if target.top_role >= bot_member.top_role:
+            return None, f"❌ I can't ban **{target.display_name}**, their role is higher than or equal to mine."
+        reason = args.get("reason") or "None"
+        try:
+            await guild.ban(target, reason=reason)
+            await send_goodbye_message(target, guild)
+            embed = discord.Embed(
+                title=parse_placeholders("✅ {user.name} has been banned.", target, guild),
+                color=0xe74c3c,
+                description=parse_placeholders("Reason: {reason}", target, guild, extra={"reason": reason})
+            )
+            embed.set_footer(text=f"{guild.name}｜67")
+            return embed, None
+        except discord.Forbidden:
+            return None, "❌ Call any moderator to give me a higher privileges."
+
+    elif tool_name == "warn_member":
+        if not invoker.guild_permissions.moderate_members:
+            return None, "❌ You don't have permission to warn members."
+        warn_msg = (args.get("warn_message") or "").strip()
+        if not warn_msg:
+            return None, "❌ No warning message provided."
+        embed = discord.Embed(
+            title="⚠️ Warn",
+            color=0xff8500,
+            description=f"`{target.name}` got warned by `{invoker.name}`\nWarn message:\n```\n{warn_msg}\n```"
+        )
+        embed.set_footer(text=f"{guild.name}｜67")
+        try:
+            dm_embed = discord.Embed(
+                title="⚠️ Warn",
+                color=0xff8500,
+                description=f"You have received a warn from {guild.name} by {invoker.name}\nWarn message:\n```\n{warn_msg}\n```"
+            )
+            dm_embed.set_footer(text=f"{guild.name}")
+            dm_embed.timestamp = discord.utils.utcnow()
+            await target.send(embed=dm_embed)
+        except discord.Forbidden:
+            pass
+        return embed, None
+
+    return None, "❌ Unknown action."
+
+
+async def run_agent_completion(client, model: str, messages: list, guild, invoker, use_tools: bool, max_tokens: int = None):
+    """
+    跑一次 completion；如果模型決定呼叫工具，執行工具、把結果丟回模型，再拿一次自然語言回覆。
+    回傳 (ai_reply_text, embeds_list)
+    """
+    kwargs = {"model": model, "messages": messages, "temperature": 0.7}
+    if max_tokens:
+        kwargs["max_tokens"] = max_tokens
+    if use_tools:
+        kwargs["tools"] = AGENT_TOOLS
+
+    response = await client.chat.completions.create(**kwargs)
+    msg = response.choices[0].message
+    tool_calls = getattr(msg, "tool_calls", None)
+
+    embeds = []
+    if use_tools and tool_calls:
+        messages.append(msg)
+        for tc in tool_calls:
+            try:
+                args = json.loads(tc.function.arguments)
+            except Exception:
+                args = {}
+            embed, err = await execute_agent_tool(tc.function.name, args, invoker, guild)
+            if embed:
+                embeds.append(embed)
+                result_text = "Action completed successfully."
+            else:
+                result_text = err or "Action failed."
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_text})
+
+        follow_up = await client.chat.completions.create(model=model, messages=messages, temperature=0.7)
+        ai_reply_text = follow_up.choices[0].message.content
+    else:
+        ai_reply_text = msg.content
+
+    return ai_reply_text, embeds
 
 ai_cooldowns = {}
 
@@ -3571,9 +3789,10 @@ async def on_message(message: discord.Message):
                 
                 logger.info(f"✨ 成功載入 {history_count} 則連貫上下文記憶！")
 
+                # 🕵️ 只有在真實伺服器頻道、對方是真的成員時才開放 Agent 工具（私訊/個人安裝情境不給）
+                use_tools = message.guild is not None and isinstance(message.author, discord.Member)
+
                 # 🌐 優化 Tavily 搜尋關鍵字：如果有歷史故事，結合「故事起點(最早的提問)」與「最新提問」送去搜尋
-                if conversation_history:
-                    search_query = f"{conversation_history[0]['content']} {clean_content}"
                 else:
                     search_query = clean_content
                 
@@ -3605,14 +3824,15 @@ async def on_message(message: discord.Message):
                     ai_messages.append({"role": "user", "content": clean_content})
 
                 ai_reply = None
+                tool_embeds = []
                 
                 # ===========================================================
-                # 🛡️ ⚔️ 三陣營火線防禦機制 (Ollama GLM -> Gemini -> Groq)
+                # 🛡️ ⚔️ 三陣營火線防禦機制 (Kimi -> Gemini -> Groq)
                 # ===========================================================
                 used_provider = None  # 💡 用於追蹤是哪一個模型成功回應
 
                 # ───【第一防線：Kimi（Moonshot）】───
-                if os.getenv("KIMI_API_KEY") and not ai_reply:
+                if os.getenv("MOONSHOT_API_KEY") and not ai_reply:
                     if is_political_topic(clean_content):
                         logger.info("🚫 [第一防線] 偵測到政治相關內容，跳過 Kimi（中國模型），直接進下一防線")
                     else:
@@ -3627,6 +3847,7 @@ async def on_message(message: discord.Message):
                                         "elections, government policy, geopolitical conflicts, or any politically sensitive "
                                         "topics of any country. If asked about politics, politely decline and say you can't "
                                         "discuss political topics, then offer to help with something else. "
+                                        "If the user clearly asks you to mute/kick/ban/warn someone, use the provided tools. "
                                         "Use ENGLISH to response. but if the user use chinese, u should use TRADITIONAL CHINESE "
                                         "to response. DONT use Simplified chinese. Max 800 characters.\n\n"
                                         f"【請優先參考以下網路即時資訊回答】：\n{search_context}"
@@ -3644,13 +3865,10 @@ async def on_message(message: discord.Message):
                                 })
                             else:
                                 kimi_messages.append({"role": "user", "content": clean_content})
-                
-                            kimi_response = await kimi_client.chat.completions.create(
-                                model="kimi-k3",          # 可改成 kimi-k2.6 / kimi-k3，看你要的性價比
-                                messages=kimi_messages,
-                                temperature=0.7,
+
+                            ai_reply, tool_embeds = await run_agent_completion(
+                                kimi_client, "kimi-k3", kimi_messages, message.guild, message.author, use_tools
                             )
-                            ai_reply = kimi_response.choices[0].message.content
                             if ai_reply:
                                 logger.info("✨ [第一防線] Kimi 成功回應！")
                                 used_provider = "kimi"
@@ -3663,15 +3881,11 @@ async def on_message(message: discord.Message):
                     for model_name in gemini_models:
                         try:
                             logger.info(f"🤖 [2/3] 請求直連 Gemini API ({model_name})...")
-                            gemini_response = await gemini_client.chat.completions.create(
-                                model=model_name, 
-                                messages=ai_messages,
-                                temperature=0.7
+                            ai_reply, tool_embeds = await run_agent_completion(
+                                gemini_client, model_name, ai_messages, message.guild, message.author, use_tools
                             )
-                            ai_reply = gemini_response.choices[0].message.content
                             if ai_reply:
                                 logger.info(f"✨ [第二防線] 直連 Gemini ({model_name}) 成功救援故事！")
-                                # 💡 根據成功回應的模型決定標記
                                 if model_name in ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3-flash", "gemini-2.5-flash"]:
                                     used_provider = "gemini_loop"
                                 elif model_name in ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]:
@@ -3684,43 +3898,54 @@ async def on_message(message: discord.Message):
                 if not ai_reply:
                     try:
                         logger.info("🤖 [3/3] 前方失敗！觸發最終底線，請求 Groq API (llama-3.3-70b-versatile)...")
-                        groq_response = await groq_client.chat.completions.create(
-                            model="llama-3.3-70b-versatile",
-                            messages=ai_messages,
-                            max_tokens=600,
-                            temperature=0.7
+                        ai_reply, tool_embeds = await run_agent_completion(
+                            groq_client, "llama-3.3-70b-versatile", ai_messages, message.guild, message.author, use_tools, max_tokens=600
                         )
-                        ai_reply = groq_response.choices[0].message.content
                         if ai_reply:
                             logger.info("✨ [第三防線] Groq 終極防線救援成功！")
                             used_provider = "groq"
                     except Exception as groq_err:
                         logger.error(f"❌ [第三防線] Groq 也失敗了: {groq_err}")
-
                 # ───【🚨 終極檢查：全線癱瘓防範】───
                 if not ai_reply:
-                    logger.error("❌ [核心崩潰] Gemini 與 Groq API 管道於本次故事請求中全數癱瘓。")
+                    logger.error("❌ [核心崩潰] Kimi、Gemini 與 Groq API 管道於本次請求中全數癱瘓。")
                     await message.reply("❌ 67+AI suck. Try again later.")
                     return
 
-                # 安全字數截斷（僅針對 Groq 進行截斷，Gemini 回覆不用砍字數）
+                # 安全字數截斷（僅針對 Groq/Kimi 進行截斷，Gemini 回覆不用砍字數）
                 if used_provider not in ["gemini_loop", "gemini_lite"] and len(ai_reply) > 700:
                     ai_reply = ai_reply[:697] + "..."
-                    
-                # 🎯 根據成功的來源追加對應的新版格式浮水印
-                if used_provider == "gemini_loop":
-                    watermark = "\n\n-# **67+AI (2.7 loop)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
-                elif used_provider == "gemini_lite":
-                    watermark = "\n\n-# **67+AI (2.5a)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
-                elif used_provider == "groq":
-                    watermark = "\n\n-# **67+AI (1)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
-                elif used_provider == "kimi":
-                    watermark = "\n\n-# **67+AI (3)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
-                else:
-                    watermark = "\n\n-# 67+AI suck and frequently makes mistakes; please verify it yourself."
 
-                ai_reply = f"{ai_reply}{watermark}"
+                # 1️⃣ 先發純文字回覆（不含浮水印）
                 await message.reply(ai_reply)
+
+                # 2️⃣ Agent 有實際執行動作的話，接著把對應的嵌入發出來（跟一般斜線指令長得一模一樣）
+                for embed in tool_embeds:
+                    try:
+                        await message.channel.send(embed=embed)
+                    except Exception as e:
+                        logger.error(f"[Agent 嵌入發送失敗]: {e}")
+
+                # 3️⃣ 最後才發浮水印：真的有觸發 Agent 動作才用新版 Agent 浮水印，單純聊天維持原本各防線的浮水印
+                if tool_embeds:
+                    watermark = "-# **67+Agent (Beta)** Powered by 67+AI. 67+AI suck, it might be disorder."
+                else:
+                    if used_provider == "gemini_loop":
+                        watermark = "-# **67+AI (2.7 loop)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
+                    elif used_provider == "gemini_lite":
+                        watermark = "-# **67+AI (2.5a)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
+                    elif used_provider == "groq":
+                        watermark = "-# **67+AI (1)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
+                    elif used_provider == "kimi":
+                        watermark = "-# **67+AI (3)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
+                    else:
+                        watermark = "-# 67+AI suck and frequently makes mistakes; please verify it yourself."
+
+                try:
+                    await message.channel.send(watermark)
+                except Exception as e:
+                    logger.error(f"[浮水印發送失敗]: {e}")
+
                 return  # 結束事件，不觸發後續 XP 增加系統
 
         except Exception as e:
@@ -4037,27 +4262,160 @@ async def streaks(interaction: discord.Interaction, user: Optional[discord.Membe
     embed = view.build_personal_embed()
     await interaction.response.send_message(embed=embed, view=view)
 
-@bot.tree.command(name="seeemoji", description="Enlarge an emoji image in a Container and show its URL")
+def get_emoji_manage_guilds(user: discord.abc.User) -> list[discord.Guild]:
+    """Bot 有在、使用者有在、且使用者有 Manage Expressions 的伺服器。"""
+    out = []
+    for guild in bot.guilds:
+        member = guild.get_member(user.id)
+        if member is None:
+            continue
+        perms = member.guild_permissions
+        can = (
+            getattr(perms, "manage_expressions", False)
+            or getattr(perms, "manage_emojis_and_stickers", False)
+        )
+        if can:
+            out.append(guild)
+    return out
+
+
+async def _download_emoji_bytes(url: str) -> bytes:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"HTTP {resp.status}")
+            return await resp.read()
+
+
+async def _add_emoji_to_guild(
+    guild: discord.Guild,
+    name: str,
+    url: str,
+    animated: bool,
+    added_by: discord.abc.User,
+) -> discord.Emoji:
+    if any(e.name == name for e in guild.emojis):
+        raise ValueError(f"`:{name}:` already exists in **{guild.name}**.")
+
+    limit = guild.emoji_limit
+    animated_count = sum(1 for e in guild.emojis if e.animated)
+    static_count = sum(1 for e in guild.emojis if not e.animated)
+    if animated and animated_count >= limit:
+        raise ValueError(f"Animated emoji slots full in **{guild.name}** ({animated_count}/{limit}).")
+    if not animated and static_count >= limit:
+        raise ValueError(f"Emoji slots full in **{guild.name}** ({static_count}/{limit}).")
+
+    me = guild.me
+    bot_perms = me.guild_permissions if me else None
+    bot_can = bot_perms and (
+        getattr(bot_perms, "manage_expressions", False)
+        or getattr(bot_perms, "manage_emojis_and_stickers", False)
+    )
+    if not bot_can:
+        raise PermissionError(f"I need **Manage Expressions** in **{guild.name}**.")
+
+    img = await _download_emoji_bytes(url)
+    return await guild.create_custom_emoji(
+        name=name,
+        image=img,
+        reason=f"Added via /enlargeemoji by {added_by}",
+    )
+
+
+class AddEmojiToCurrentButton(ui.Button):
+    def __init__(self, name: str, url: str, animated: bool):
+        super().__init__(label="Add to this server", style=discord.ButtonStyle.success, emoji="➕")
+        self.emoji_name = name
+        self.emoji_url = url
+        self.animated = animated
+
+    async def callback(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if not guild:
+            return await interaction.response.send_message("❌ Guild only.")
+        await interaction.response.defer(ephemeral=True)
+        try:
+            new_emoji = await _add_emoji_to_guild(
+                guild, self.emoji_name, self.emoji_url, self.animated, interaction.user
+            )
+            self.disabled = True
+            self.label = "Added"
+            try:
+                await interaction.message.edit(view=self.view)
+            except Exception:
+                pass
+            await interaction.followup.send(
+                f"✅ Added {new_emoji} (`:{new_emoji.name}:`) to **{guild.name}**.",
+                ephemeral=True,
+            )
+        except Exception as e:
+            await interaction.followup.send(f"❌ {e}")
+
+
+class AddEmojiGuildSelect(ui.Select):
+    def __init__(self, name: str, url: str, animated: bool, guilds: list[discord.Guild]):
+        options = [
+            discord.SelectOption(label=g.name[:100], value=str(g.id), description=f"ID {g.id}"[:100])
+            for g in guilds[:25]
+        ]
+        super().__init__(placeholder="Add to my server…", min_values=1, max_values=1, options=options)
+        self.emoji_name = name
+        self.emoji_url = url
+        self.animated = animated
+
+    async def callback(self, interaction: discord.Interaction):
+        gid = int(self.values[0])
+        guild = bot.get_guild(gid)
+        if not guild:
+            return await interaction.response.send_message("❌ Server not found (bot left?).")
+
+        member = guild.get_member(interaction.user.id)
+        if not member:
+            return await interaction.response.send_message("❌ You're not in that server.")
+
+        perms = member.guild_permissions
+        can = (
+            getattr(perms, "manage_expressions", False)
+            or getattr(perms, "manage_emojis_and_stickers", False)
+        )
+        if not can:
+            return await interaction.response.send_message(
+                "❌ You need **Manage Expressions** there.", ephemeral=True
+            )
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            new_emoji = await _add_emoji_to_guild(
+                guild, self.emoji_name, self.emoji_url, self.animated, interaction.user
+            )
+            await interaction.followup.send(
+                f"✅ Added {new_emoji} (`:{new_emoji.name}:`) to **{guild.name}**.",
+                ephemeral=True,
+            )
+        except Exception as e:
+            await interaction.followup.send(f"❌ {e}")
+
+
+@bot.tree.command(name="enlargeemoji", description="Enlarge an emoji image in a Container and show its URL")
 @app_commands.describe(emoji="Paste the emoji (e.g. <:kyk:1497866917468442665>)")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def seeemoji(interaction: discord.Interaction, emoji: str):
+async def enlargeemoji(interaction: discord.Interaction, emoji: str):
     emoji = emoji.strip()
 
-    # Only accept Discord custom emoji: <:name:id> or <a:name:id>
     m = re.match(r"<(a?):([a-zA-Z0-9_]+):(\d+)>$", emoji)
     if not m:
         return await interaction.response.send_message(
-            "❌ WTH is this? Paste a Discord custom emoji like `<:name:1234567890>`.",
-            ephemeral=True
+            "❌ WTH is this? Paste a Discord custom emoji like `<:name:1234567890>`."
         )
 
-    animated, name, eid = m.groups()
+    animated_flag, name, eid = m.groups()
+    animated = bool(animated_flag)
     ext = "gif" if animated else "png"
     url = f"https://cdn.discordapp.com/emojis/{eid}.{ext}?size=4096&quality=lossless"
     title = f":{name}:"
 
-    view = discord.ui.LayoutView(timeout=None)
+    view = discord.ui.LayoutView(timeout=180)
     container = discord.ui.Container(
         discord.ui.TextDisplay(f"**{title}**"),
         discord.ui.MediaGallery(
@@ -4067,35 +4425,59 @@ async def seeemoji(interaction: discord.Interaction, emoji: str):
         accent_color=0x5865F2,
     )
     view.add_item(container)
+
+    # Container 下方：有當前服權限 → Add to this server；否則 → Add to my server
+    manage_guilds = get_emoji_manage_guilds(interaction.user)
+    current = interaction.guild
+
+    can_this_server = False
+    if current and isinstance(interaction.user, discord.Member):
+        perms = interaction.user.guild_permissions
+        can_this_server = (
+            getattr(perms, "manage_expressions", False)
+            or getattr(perms, "manage_emojis_and_stickers", False)
+        )
+        if can_this_server and any(e.name == name for e in current.emojis):
+            can_this_server = False
+
+    if can_this_server:
+        row = discord.ui.ActionRow()
+        row.add_item(AddEmojiToCurrentButton(name=name, url=url, animated=animated))
+        view.add_item(row)
+    else:
+        others = [g for g in manage_guilds if not current or g.id != current.id]
+        if not others:
+            others = list(manage_guilds)
+        if others:
+            row = discord.ui.ActionRow()
+            row.add_item(AddEmojiGuildSelect(name=name, url=url, animated=animated, guilds=others))
+            view.add_item(row)
+
     await interaction.response.send_message(view=view)
 
-@bot.tree.command(name="seesticker", description="Enlarge the latest sticker or image from the message above")
-async def seesticker(interaction: discord.Interaction):
+
+@bot.tree.command(name="enlargesticker", description="Enlarge the latest sticker or image from the message above")
+async def enlargesticker(interaction: discord.Interaction):
     if not interaction.channel:
-        return await interaction.response.send_message("❌ Can't read message history here.", ephemeral=True)
+        return await interaction.response.send_message("❌ Can't read message history here.")
 
     await interaction.response.defer()
 
     def sticker_url(sticker) -> str:
-        # StickerItem / Sticker 都盡量用官方 url；不行再依 format 組 CDN
         url = getattr(sticker, "url", None)
         if url:
             return str(url)
-
         sid = sticker.id
         fmt = getattr(sticker, "format", None)
-        # 1=png, 2=apng, 3=lottie, 4=gif
         fmt_value = getattr(fmt, "value", fmt)
-        if fmt_value == 4:  # gif
+        if fmt_value == 4:
             return f"https://media.discordapp.net/stickers/{sid}.gif?size=4096"
-        if fmt_value == 3:  # lottie（畫廊不一定播得了，仍給 json 連結）
+        if fmt_value == 3:
             return f"https://discord.com/stickers/{sid}.json"
-        # png / apng / 預設
         return f"https://media.discordapp.net/stickers/{sid}.png?size=4096"
 
     try:
         async for raw in interaction.channel.history(limit=1):
-            # 重抓一次，避免 history 回傳的 sticker 資料不完整
             try:
                 msg = await interaction.channel.fetch_message(raw.id)
             except (discord.NotFound, discord.HTTPException):
@@ -4104,13 +4486,11 @@ async def seesticker(interaction: discord.Interaction):
             url = None
             name = None
 
-            # 1) Discord 貼圖
             if msg.stickers:
                 sticker = msg.stickers[0]
                 url = sticker_url(sticker)
                 name = getattr(sticker, "name", None) or "Sticker"
 
-            # 2) 沒貼圖才退回附件圖片
             if not url:
                 for att in msg.attachments:
                     if (att.content_type and att.content_type.startswith("image/")) or att.filename.lower().endswith(
@@ -4132,9 +4512,8 @@ async def seesticker(interaction: discord.Interaction):
                         break
 
             if not url:
-                # 除錯用：看 bot 實際讀到什麼
                 logger.warning(
-                    f"[/seesticker] msg={msg.id} stickers={len(msg.stickers)} "
+                    f"[/enlargesticker] msg={msg.id} stickers={len(msg.stickers)} "
                     f"attachments={len(msg.attachments)} embeds={len(msg.embeds)}"
                 )
                 return await interaction.followup.send(
@@ -4158,12 +4537,11 @@ async def seesticker(interaction: discord.Interaction):
         await interaction.followup.send("❌ No message found above.")
     except discord.Forbidden:
         await interaction.followup.send(
-            "❌ Bro I don't have permission to read message history in this channel.",
-            ephemeral=True,
+            "❌ Bro I don't have permission to read message history in this channel."
         )
     except Exception as e:
-        logger.error(f"[/seesticker error]: {e}")
-        await interaction.followup.send(f"❌ Sry, something went wrong: {e}", ephemeral=True)
+        logger.error(f"[/enlargesticker error]: {e}")
+        await interaction.followup.send(f"❌ Sry, something went wrong: {e}")
 
 # =================================================================
 # 🔑 8. RUN BOT
