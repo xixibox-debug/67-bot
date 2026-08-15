@@ -3793,6 +3793,8 @@ async def on_message(message: discord.Message):
                 use_tools = message.guild is not None and isinstance(message.author, discord.Member)
 
                 # 🌐 優化 Tavily 搜尋關鍵字：如果有歷史故事，結合「故事起點(最早的提問)」與「最新提問」送去搜尋
+                if conversation_history:
+                    search_query = f"{conversation_history[0]['content']} {clean_content}"
                 else:
                     search_query = clean_content
                 
