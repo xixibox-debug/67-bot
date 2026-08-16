@@ -80,13 +80,32 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "mute_member",
-            "description": "Timeout (mute) a member in this server. Only call this when the user CLEARLY and explicitly asks to mute/timeout someone.",
+            "description": (
+                "Timeout (mute) a member. Use this not just when explicitly asked, but ALSO whenever the "
+                "conversation clearly describes someone being disruptive right now (e.g. spamming, being annoying, "
+                "being toxic, won't stop talking, being rude). Use your own judgement — you don't need the exact "
+                "word 'mute'. Default to a short duration like '10m' for minor annoyance, longer for worse behavior."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "user_id": {"type": "string", "description": "The Discord user ID or mention (e.g. <@123456789012345678>) of the member to mute."},
+                    "user_id": {"type": "string", "description": "The Discord user ID of the member to mute. Pick from the 'Available target candidates' list."},
                     "duration": {"type": "string", "description": "Mute duration like '10m', '1h', '2d'. Default '10m' if not specified."},
-                    "reason": {"type": "string", "description": "Reason for the mute."}
+                    "reason": {"type": "string", "description": "Reason for the mute, inferred from context if not stated."}
+                },
+                "required": ["user_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "unmute_member",
+            "description": "Remove an active timeout/mute from a member. Use when asked to unmute, forgive, or let someone talk again.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "The Discord user ID of the member to unmute."}
                 },
                 "required": ["user_id"]
             }
@@ -96,12 +115,12 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "kick_member",
-            "description": "Kick a member from this server. Only call this when the user CLEARLY and explicitly asks to kick someone.",
+            "description": "Kick a member from this server. Use when the conversation implies someone should be removed but not permanently banned (e.g. a one-off serious incident).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "user_id": {"type": "string", "description": "The Discord user ID or mention of the member to kick."},
-                    "reason": {"type": "string", "description": "Reason for the kick."}
+                    "user_id": {"type": "string", "description": "The Discord user ID of the member to kick."},
+                    "reason": {"type": "string", "description": "Reason for the kick, inferred from context if not stated."}
                 },
                 "required": ["user_id"]
             }
@@ -111,12 +130,12 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "ban_member",
-            "description": "Ban a member from this server. Only call this when the user CLEARLY and explicitly asks to ban someone.",
+            "description": "Ban a member from this server. Use when the conversation implies someone did something severe enough to be permanently removed (raiding, serious harassment, etc).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "user_id": {"type": "string", "description": "The Discord user ID or mention of the member to ban."},
-                    "reason": {"type": "string", "description": "Reason for the ban."}
+                    "user_id": {"type": "string", "description": "The Discord user ID of the member to ban."},
+                    "reason": {"type": "string", "description": "Reason for the ban, inferred from context if not stated."}
                 },
                 "required": ["user_id"]
             }
@@ -126,14 +145,89 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "warn_member",
-            "description": "Send a warning to a member (posted in the channel and DMed to them). Only call this when the user CLEARLY and explicitly asks to warn someone.",
+            "description": "Send a formal warning to a member, posted in the channel and DMed to them. Use for behavior that deserves a documented warning but not a mute/kick/ban.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "user_id": {"type": "string", "description": "The Discord user ID or mention of the member to warn."},
-                    "warn_message": {"type": "string", "description": "The warning message content."}
+                    "user_id": {"type": "string", "description": "The Discord user ID of the member to warn."},
+                    "warn_message": {"type": "string", "description": "The warning message content, write it yourself based on the context."}
                 },
                 "required": ["user_id", "warn_message"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_role",
+            "description": "Give a role to a member. Use when asked to add/give someone a role, or promote them.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "The Discord user ID of the member."},
+                    "role_id": {"type": "string", "description": "The Discord role ID or mention (e.g. <@&123456789012345678>) to give."}
+                },
+                "required": ["user_id", "role_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remove_role",
+            "description": "Remove a role from a member. Use when asked to remove/take away someone's role, or demote them.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "The Discord user ID of the member."},
+                    "role_id": {"type": "string", "description": "The Discord role ID or mention to remove."}
+                },
+                "required": ["user_id", "role_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_balance",
+            "description": "Set a member's economy balance to a specific amount. Use when asked to give/set someone's money/balance/coins.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "The Discord user ID of the member."},
+                    "amount": {"type": "integer", "description": "The new balance amount (must be >= 0)."}
+                },
+                "required": ["user_id", "amount"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_level",
+            "description": "Set a member's level to a specific number. Use when asked to change/give someone a level.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "The Discord user ID of the member."},
+                    "level": {"type": "integer", "description": "The new level (must be >= 1)."}
+                },
+                "required": ["user_id", "level"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_streaks",
+            "description": "Set (flood or reduce) a member's Streaks day count. Use when asked to give/reset/fix someone's streak days.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "The Discord user ID of the member."},
+                    "days": {"type": "integer", "description": "The new streak day count (must be >= 0)."}
+                },
+                "required": ["user_id", "days"]
             }
         }
     },
@@ -145,7 +239,235 @@ def _resolve_target_id(raw: str) -> str | None:
     m = re.match(r"^<@!?(\d+)>$", raw)
     if m:
         return m.group(1)
+    m2 = re.match(r"^<@&(\d+)>$", raw)  # 身分組也可能長這樣被誤傳進來，一併處理
+    if m2:
+        return m2.group(1)
     return raw if raw.isdigit() else None
+
+
+def build_target_candidates(message: discord.Message) -> str:
+    """把這則訊息裡 @ 到的人、還有回覆鏈裡出現過的人，整理成一份「候選名單」給 AI 參考，
+    避免 AI 在完全沒有明確 ID 可用時用猜的（猜錯就會直接被 execute_agent_tool 擋下來）。"""
+    candidates = {}
+    for m in message.mentions:
+        if not m.bot:
+            candidates[m.id] = m.name
+    if message.reference and isinstance(message.reference.resolved, discord.Message):
+        author = message.reference.resolved.author
+        if not author.bot:
+            candidates[author.id] = author.name
+    if not candidates:
+        return "Available target candidates: (none mentioned in this message — if the user didn't @ mention anyone, ask them to @ mention the target instead of guessing.)"
+    lines = [f"- {name} (user_id: {uid})" for uid, name in candidates.items()]
+    return "Available target candidates:\n" + "\n".join(lines)
+
+
+async def execute_agent_tool(tool_name: str, args: dict, invoker: discord.Member, guild: discord.Guild) -> tuple:
+    """執行 Agent 決定呼叫的工具，回傳 (embed 或 None, 錯誤訊息或 None)。一律用 invoker 本人的權限驗證。"""
+    target_id = _resolve_target_id(args.get("user_id", ""))
+    if not target_id:
+        return None, "❌ Agent couldn't figure out who you meant. Please @ mention the target member clearly."
+
+    target = guild.get_member(int(target_id))
+    if not target:
+        return None, "❌ That user isn't in this server."
+    if target.id == invoker.id and tool_name in ("mute_member", "kick_member", "ban_member", "warn_member"):
+        return None, "❌ You can't target yourself."
+    if target.id == bot.user.id:
+        return None, "❌ You can't target me."
+    if target.id == guild.owner_id and tool_name in ("mute_member", "kick_member", "ban_member"):
+        return None, "❌ Bro don't do that. I don't wnat to be fired."
+
+    bot_member = guild.me
+
+    if tool_name == "mute_member":
+        if not invoker.guild_permissions.moderate_members:
+            return None, "❌ You don't have permission to timeout members."
+        duration_str = args.get("duration") or "10m"
+        delta, err = parse_mute_duration(duration_str)
+        if err:
+            return None, f"❌ {err}"
+        if target.top_role >= bot_member.top_role:
+            return None, f"❌ I can't mute **{target.display_name}**, their role is higher than or equal to mine."
+        reason = args.get("reason") or "None"
+        try:
+            if delta:
+                await target.timeout(delta, reason=reason)
+            embed = discord.Embed(
+                title=parse_placeholders("✅ {user.name} has been muted.", target, guild),
+                color=0x2ecc71,
+                description=f"Time: {duration_str}\nReason: {reason}"
+            )
+            embed.set_footer(text=f"{guild.name}｜67")
+            return embed, None
+        except discord.Forbidden:
+            return None, "❌ Call any moderator to give me a higher privileges."
+
+    elif tool_name == "unmute_member":
+        if not invoker.guild_permissions.moderate_members:
+            return None, "❌ You don't have permission to unmute members."
+        try:
+            await target.timeout(None)
+            embed = discord.Embed(
+                title=parse_placeholders("✅ {user.name} has been unmuted.", target, guild),
+                color=0x2ecc71
+            )
+            embed.set_footer(text=f"{guild.name}｜67")
+            return embed, None
+        except discord.Forbidden:
+            return None, "❌ Call any moderator to give me a higher privileges."
+
+    elif tool_name == "kick_member":
+        if not invoker.guild_permissions.kick_members:
+            return None, "❌ You don't have permission to kick members."
+        if target.top_role >= bot_member.top_role:
+            return None, f"❌ I can't kick **{target.display_name}**, their role is higher than or equal to mine."
+        reason = args.get("reason") or "None"
+        try:
+            await target.kick(reason=reason)
+            await send_goodbye_message(target, guild)
+            embed = discord.Embed(title=parse_placeholders("✅ {user.name} has been kicked.", target, guild), color=0xe74c3c, description=parse_placeholders("Reason: {reason}", target, guild, extra={"reason": reason}))
+            embed.set_footer(text=f"{guild.name}｜67")
+            return embed, None
+        except discord.Forbidden:
+            return None, "❌ Call any moderator to give me a higher privileges."
+
+    elif tool_name == "ban_member":
+        if not invoker.guild_permissions.ban_members:
+            return None, "❌ You don't have permission to ban members."
+        if target.top_role >= bot_member.top_role:
+            return None, f"❌ I can't ban **{target.display_name}**, their role is higher than or equal to mine."
+        reason = args.get("reason") or "None"
+        try:
+            await guild.ban(target, reason=reason)
+            await send_goodbye_message(target, guild)
+            embed = discord.Embed(
+                title=parse_placeholders("✅ {user.name} has been banned.", target, guild),
+                color=0xe74c3c,
+                description=parse_placeholders("Reason: {reason}", target, guild, extra={"reason": reason})
+            )
+            embed.set_footer(text=f"{guild.name}｜67")
+            return embed, None
+        except discord.Forbidden:
+            return None, "❌ Call any moderator to give me a higher privileges."
+
+    elif tool_name == "warn_member":
+        if not invoker.guild_permissions.moderate_members:
+            return None, "❌ You don't have permission to warn members."
+        warn_msg = (args.get("warn_message") or "").strip()
+        if not warn_msg:
+            return None, "❌ No warning message provided."
+        embed = discord.Embed(
+            title="⚠️ Warn",
+            color=0xff8500,
+            description=f"`{target.name}` got warned by `{invoker.name}`\nWarn message:\n```\n{warn_msg}\n```"
+        )
+        embed.set_footer(text=f"{guild.name}｜67")
+        try:
+            dm_embed = discord.Embed(
+                title="⚠️ Warn",
+                color=0xff8500,
+                description=f"You have received a warn from {guild.name} by {invoker.name}\nWarn message:\n```\n{warn_msg}\n```"
+            )
+            dm_embed.set_footer(text=f"{guild.name}")
+            dm_embed.timestamp = discord.utils.utcnow()
+            await target.send(embed=dm_embed)
+        except discord.Forbidden:
+            pass
+        return embed, None
+
+    elif tool_name == "add_role":
+        if not invoker.guild_permissions.administrator:
+            return None, "❌ You don't have permission to manage roles."
+        role_id = _resolve_target_id(args.get("role_id", ""))
+        role = guild.get_role(int(role_id)) if role_id else None
+        if not role:
+            return None, "❌ Couldn't find that role."
+        if role >= bot_member.top_role:
+            return None, f"❌ I can't manage **{role.name}**, it's higher than or equal to my own role."
+        try:
+            await target.add_roles(role, reason=f"Added by Agent on behalf of {invoker}")
+            embed = discord.Embed(title=f"✅ Added {role.mention} to {target.mention}", color=0x2ecc71)
+            embed.set_footer(text=f"{guild.name}｜67")
+            return embed, None
+        except discord.Forbidden:
+            return None, "❌ Call any moderator to give me a higher privileges."
+
+    elif tool_name == "remove_role":
+        if not invoker.guild_permissions.administrator:
+            return None, "❌ You don't have permission to manage roles."
+        role_id = _resolve_target_id(args.get("role_id", ""))
+        role = guild.get_role(int(role_id)) if role_id else None
+        if not role:
+            return None, "❌ Couldn't find that role."
+        if role >= bot_member.top_role:
+            return None, f"❌ I can't manage **{role.name}**, it's higher than or equal to my own role."
+        try:
+            await target.remove_roles(role, reason=f"Removed by Agent on behalf of {invoker}")
+            embed = discord.Embed(title=f"✅ Removed {role.mention} from {target.mention}", color=0x2ecc71)
+            embed.set_footer(text=f"{guild.name}｜67")
+            return embed, None
+        except discord.Forbidden:
+            return None, "❌ Call any moderator to give me a higher privileges."
+
+    elif tool_name == "set_balance":
+        if not invoker.guild_permissions.administrator:
+            return None, "❌ You don't have permission to modify balances."
+        amount = args.get("amount")
+        if amount is None or int(amount) < 0:
+            return None, "❌ Balance cannot be negative."
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        ensure_eco_user(str(guild.id), str(target.id))
+        cursor.execute("UPDATE economy SET balance = ? WHERE guild_id = ? AND user_id = ?", (int(amount), str(guild.id), str(target.id)))
+        conn.commit(); conn.close()
+        embed = discord.Embed(title=f"💵 Set {target.name}'s balance to ${int(amount)}", color=0x2ecc71)
+        embed.set_footer(text=f"{guild.name}｜67")
+        return embed, None
+
+    elif tool_name == "set_level":
+        if not invoker.guild_permissions.administrator:
+            return None, "❌ You don't have permission to set levels."
+        level = args.get("level")
+        if level is None or int(level) < 1:
+            return None, "❌ Level must be at least 1."
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute("SELECT count_67 FROM levels WHERE guild_id = ? AND user_id = ?", (str(guild.id), str(target.id)))
+        row = cursor.fetchone()
+        current_67 = row[0] if row else 0
+        cursor.execute("INSERT OR REPLACE INTO levels (guild_id, user_id, xp, level, count_67) VALUES (?, ?, ?, ?, ?)", (str(guild.id), str(target.id), 0, int(level), current_67))
+        conn.commit(); conn.close()
+        embed = discord.Embed(title=f"🔥 Set {target.name}'s level to {int(level)}", color=0x2ecc71)
+        embed.set_footer(text=f"{guild.name}｜67")
+        return embed, None
+
+    elif tool_name == "set_streaks":
+        if not invoker.guild_permissions.administrator:
+            return None, "❌ You don't have permission to set streaks."
+        days = args.get("days")
+        if days is None or int(days) < 0:
+            return None, "❌ Streak days cannot be negative."
+        days = int(days)
+        gid_str, uid_str = str(guild.id), str(target.id)
+        tz = datetime.timezone(datetime.timedelta(hours=0))
+        today_str = datetime.datetime.now(tz).strftime("%Y-%m-%d")
+        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        cursor.execute("SELECT longest_streak FROM streaks_data WHERE guild_id = ? AND user_id = ?", (gid_str, uid_str))
+        row = cursor.fetchone()
+        if row:
+            cursor.execute("UPDATE streaks_data SET current_streak = ?, longest_streak = ?, last_streak_date = ? WHERE guild_id = ? AND user_id = ?",
+                           (days, max(row[0], days), today_str, gid_str, uid_str))
+        else:
+            cursor.execute("INSERT INTO streaks_data (guild_id, user_id, current_streak, longest_streak, last_streak_date) VALUES (?, ?, ?, ?, ?)",
+                           (gid_str, uid_str, days, days, today_str))
+        conn.commit(); conn.close()
+        recompute_current_week_status(gid_str, uid_str, days)
+        await check_streak_roles(target, days)
+        await apply_streak_nickname(target, days)
+        embed = discord.Embed(title=f"🔥 Set {target.name}'s Streaks to {days} days", color=0x2ecc71)
+        embed.set_footer(text=f"{guild.name}｜67")
+        return embed, None
+
+    return None, "❌ Unknown action."
 
 
 async def execute_agent_tool(tool_name: str, args: dict, invoker: discord.Member, guild: discord.Guild) -> tuple:
@@ -3808,6 +4130,11 @@ async def on_message(message: discord.Message):
                         "content": (
                             "You are an AI model in a Discord bot called '67'. You like to say 67 (but don't say it too often) and respond just like Meta AI. "
                             "Drop the corporate PR tone, be direct, slightly witty. "
+                            "You also have real moderation/admin tools available (mute, kick, ban, warn, role management, economy, level, streaks). "
+                            "Use your own judgement liberally to decide when to use them — you don't need an explicit command-like phrase. "
+                            "If the conversation clearly describes someone misbehaving (annoying, spamming, toxic, etc), take an appropriate "
+                            "action yourself (e.g. a short mute) instead of just talking about it. "
+                            f"{build_target_candidates(message)}\n\n"
                             "Use ENGLISH to response. but if the user use chinese, u should use TRADITIONAL CHINESE to response. DONT use Simplified chinese. Max 800 characters.\n\n"
                             f"【請優先參考以下網路即時資訊回答】：\n{search_context}"
                         )
@@ -3849,7 +4176,10 @@ async def on_message(message: discord.Message):
                                         "elections, government policy, geopolitical conflicts, or any politically sensitive "
                                         "topics of any country. If asked about politics, politely decline and say you can't "
                                         "discuss political topics, then offer to help with something else. "
-                                        "If the user clearly asks you to mute/kick/ban/warn someone, use the provided tools. "
+                                        "You also have real moderation/admin tools available. Use your own judgement liberally — "
+                                        "you don't need an explicit command-like phrase. If the conversation clearly describes someone "
+                                        "misbehaving (annoying, spamming, toxic, etc), take an appropriate action yourself (e.g. a short mute). "
+                                        f"{build_target_candidates(message)}\n\n"
                                         "Use ENGLISH to response. but if the user use chinese, u should use TRADITIONAL CHINESE "
                                         "to response. DONT use Simplified chinese. Max 800 characters.\n\n"
                                         f"【請優先參考以下網路即時資訊回答】：\n{search_context}"
@@ -3918,17 +4248,7 @@ async def on_message(message: discord.Message):
                 if used_provider not in ["gemini_loop", "gemini_lite"] and len(ai_reply) > 700:
                     ai_reply = ai_reply[:697] + "..."
 
-                # 1️⃣ 先發純文字回覆（不含浮水印）
-                await message.reply(ai_reply)
-
-                # 2️⃣ Agent 有實際執行動作的話，接著把對應的嵌入發出來（跟一般斜線指令長得一模一樣）
-                for embed in tool_embeds:
-                    try:
-                        await message.channel.send(embed=embed)
-                    except Exception as e:
-                        logger.error(f"[Agent 嵌入發送失敗]: {e}")
-
-                # 3️⃣ 最後才發浮水印：真的有觸發 Agent 動作才用新版 Agent 浮水印，單純聊天維持原本各防線的浮水印
+                # 🎯 決定浮水印文字：真的有觸發 Agent 動作才用新版 Agent 浮水印，單純聊天維持原本各防線的浮水印
                 if tool_embeds:
                     watermark = "-# **67+Agent (Beta)** Powered by 67+AI. 67+AI suck, it might be disorder."
                 else:
@@ -3943,10 +4263,12 @@ async def on_message(message: discord.Message):
                     else:
                         watermark = "-# 67+AI suck and frequently makes mistakes; please verify it yourself."
 
+                # 🎯 文字、嵌入、浮水印全部塞在同一則訊息、一次送出，避免分開發送時順序錯亂或回覆錯訊息
+                final_content = f"{ai_reply}\n\n{watermark}"
                 try:
-                    await message.channel.send(watermark)
+                    await message.reply(content=final_content, embeds=tool_embeds[:10])  # Discord 一則訊息最多 10 個嵌入
                 except Exception as e:
-                    logger.error(f"[浮水印發送失敗]: {e}")
+                    logger.error(f"[Agent 回覆發送失敗]: {e}")
 
                 return  # 結束事件，不觸發後續 XP 增加系統
 
