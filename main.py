@@ -245,17 +245,29 @@ def _resolve_target_id(raw: str) -> str | None:
     return raw if raw.isdigit() else None
 
 
-def build_target_candidates(message: discord.Message) -> str:
+async def build_target_candidates(message: discord.Message) -> str:
     """把這則訊息裡 @ 到的人、還有回覆鏈裡出現過的人，整理成一份「候選名單」給 AI 參考，
     避免 AI 在完全沒有明確 ID 可用時用猜的（猜錯就會直接被 execute_agent_tool 擋下來）。"""
     candidates = {}
     for m in message.mentions:
         if not m.bot:
             candidates[m.id] = m.name
-    if message.reference and isinstance(message.reference.resolved, discord.Message):
-        author = message.reference.resolved.author
-        if not author.bot:
-            candidates[author.id] = author.name
+
+    if message.reference and message.reference.message_id:
+        ref_author = None
+        # 🎯 先看快取裡有沒有，快取沒有的話（常見情況）主動去 Discord 抓，不能只靠 .resolved
+        if isinstance(message.reference.resolved, discord.Message):
+            ref_author = message.reference.resolved.author
+        else:
+            try:
+                ref_msg = await message.channel.fetch_message(message.reference.message_id)
+                ref_author = ref_msg.author
+            except Exception as e:
+                logger.warning(f"⚠️ [候選名單] 抓不到被回覆的訊息: {e}")
+
+        if ref_author and not ref_author.bot:
+            candidates[ref_author.id] = ref_author.name
+
     if not candidates:
         return "Available target candidates: (none mentioned in this message — if the user didn't @ mention anyone, ask them to @ mention the target instead of guessing.)"
     lines = [f"- {name} (user_id: {uid})" for uid, name in candidates.items()]
@@ -468,110 +480,6 @@ async def execute_agent_tool(tool_name: str, args: dict, invoker: discord.Member
         return embed, None
 
     return None, "❌ Unknown action."
-
-
-async def execute_agent_tool(tool_name: str, args: dict, invoker: discord.Member, guild: discord.Guild) -> tuple:
-    """執行 Agent 決定呼叫的工具，回傳 (embed 或 None, 錯誤訊息或 None)。一律用 invoker 本人的權限驗證。"""
-    target_id = _resolve_target_id(args.get("user_id", ""))
-    if not target_id:
-        return None, "❌ Agent couldn't figure out who you meant. Please @ mention the target member clearly."
-
-    target = guild.get_member(int(target_id))
-    if not target:
-        return None, "❌ That user isn't in this server."
-    if target.id == invoker.id:
-        return None, "❌ You can't target yourself."
-    if target.id == bot.user.id:
-        return None, "❌ You can't target me."
-    if target.id == guild.owner_id:
-        return None, "❌ Bro don't do that. I don't wnat to be fired."
-
-    bot_member = guild.me
-
-    if tool_name == "mute_member":
-        if not invoker.guild_permissions.moderate_members:
-            return None, "❌ You don't have permission to timeout members."
-        duration_str = args.get("duration") or "10m"
-        delta, err = parse_mute_duration(duration_str)
-        if err:
-            return None, f"❌ {err}"
-        if target.top_role >= bot_member.top_role:
-            return None, f"❌ I can't mute **{target.display_name}**, their role is higher than or equal to mine."
-        reason = args.get("reason") or "None"
-        try:
-            if delta:
-                await target.timeout(delta, reason=reason)
-            embed = discord.Embed(
-                title=parse_placeholders("✅ {user.name} has been muted.", target, guild),
-                color=0x2ecc71,
-                description=f"Time: {duration_str}\nReason: {reason}"
-            )
-            embed.set_footer(text=f"{guild.name}｜67")
-            return embed, None
-        except discord.Forbidden:
-            return None, "❌ Call any moderator to give me a higher privileges."
-
-    elif tool_name == "kick_member":
-        if not invoker.guild_permissions.kick_members:
-            return None, "❌ You don't have permission to kick members."
-        if target.top_role >= bot_member.top_role:
-            return None, f"❌ I can't kick **{target.display_name}**, their role is higher than or equal to mine."
-        reason = args.get("reason") or "None"
-        try:
-            await target.kick(reason=reason)
-            await send_goodbye_message(target, guild)
-            embed = discord.Embed(title=parse_placeholders("✅ {user.name} has been kicked.", target, guild), color=0xe74c3c, description=parse_placeholders("Reason: {reason}", target, guild, extra={"reason": reason}))
-            embed.set_footer(text=f"{guild.name}｜67")
-            return embed, None
-        except discord.Forbidden:
-            return None, "❌ Call any moderator to give me a higher privileges."
-
-    elif tool_name == "ban_member":
-        if not invoker.guild_permissions.ban_members:
-            return None, "❌ You don't have permission to ban members."
-        if target.top_role >= bot_member.top_role:
-            return None, f"❌ I can't ban **{target.display_name}**, their role is higher than or equal to mine."
-        reason = args.get("reason") or "None"
-        try:
-            await guild.ban(target, reason=reason)
-            await send_goodbye_message(target, guild)
-            embed = discord.Embed(
-                title=parse_placeholders("✅ {user.name} has been banned.", target, guild),
-                color=0xe74c3c,
-                description=parse_placeholders("Reason: {reason}", target, guild, extra={"reason": reason})
-            )
-            embed.set_footer(text=f"{guild.name}｜67")
-            return embed, None
-        except discord.Forbidden:
-            return None, "❌ Call any moderator to give me a higher privileges."
-
-    elif tool_name == "warn_member":
-        if not invoker.guild_permissions.moderate_members:
-            return None, "❌ You don't have permission to warn members."
-        warn_msg = (args.get("warn_message") or "").strip()
-        if not warn_msg:
-            return None, "❌ No warning message provided."
-        embed = discord.Embed(
-            title="⚠️ Warn",
-            color=0xff8500,
-            description=f"`{target.name}` got warned by `{invoker.name}`\nWarn message:\n```\n{warn_msg}\n```"
-        )
-        embed.set_footer(text=f"{guild.name}｜67")
-        try:
-            dm_embed = discord.Embed(
-                title="⚠️ Warn",
-                color=0xff8500,
-                description=f"You have received a warn from {guild.name} by {invoker.name}\nWarn message:\n```\n{warn_msg}\n```"
-            )
-            dm_embed.set_footer(text=f"{guild.name}")
-            dm_embed.timestamp = discord.utils.utcnow()
-            await target.send(embed=dm_embed)
-        except discord.Forbidden:
-            pass
-        return embed, None
-
-    return None, "❌ Unknown action."
-
 
 async def run_agent_completion(client, model: str, messages: list, guild, invoker, use_tools: bool, max_tokens: int = None):
     """
@@ -4134,7 +4042,7 @@ async def on_message(message: discord.Message):
                             "Use your own judgement liberally to decide when to use them — you don't need an explicit command-like phrase. "
                             "If the conversation clearly describes someone misbehaving (annoying, spamming, toxic, etc), take an appropriate "
                             "action yourself (e.g. a short mute) instead of just talking about it. "
-                            f"{build_target_candidates(message)}\n\n"
+                            f"{await build_target_candidates(message)}\n\n"
                             "Use ENGLISH to response. but if the user use chinese, u should use TRADITIONAL CHINESE to response. DONT use Simplified chinese. Max 800 characters.\n\n"
                             f"【請優先參考以下網路即時資訊回答】：\n{search_context}"
                         )
@@ -4179,7 +4087,7 @@ async def on_message(message: discord.Message):
                                         "You also have real moderation/admin tools available. Use your own judgement liberally — "
                                         "you don't need an explicit command-like phrase. If the conversation clearly describes someone "
                                         "misbehaving (annoying, spamming, toxic, etc), take an appropriate action yourself (e.g. a short mute). "
-                                        f"{build_target_candidates(message)}\n\n"
+                                        f"{await build_target_candidates(message)}\n\n"
                                         "Use ENGLISH to response. but if the user use chinese, u should use TRADITIONAL CHINESE "
                                         "to response. DONT use Simplified chinese. Max 800 characters.\n\n"
                                         f"【請優先參考以下網路即時資訊回答】：\n{search_context}"
@@ -4800,65 +4708,61 @@ async def enlargesticker(interaction: discord.Interaction):
             return f"https://discord.com/stickers/{sid}.json"
         return f"https://media.discordapp.net/stickers/{sid}.png?size=4096"
 
+    def pick_image(msg: discord.Message):
+        for att in msg.attachments:
+            if (att.content_type and att.content_type.startswith("image/")) or att.filename.lower().endswith(
+                (".png", ".jpg", ".jpeg", ".gif", ".webp")
+            ):
+                return att.url, att.filename or "Image"
+        for emb in msg.embeds:
+            if emb.image and emb.image.url:
+                return emb.image.url, "Image"
+            if emb.thumbnail and emb.thumbnail.url:
+                return emb.thumbnail.url, "Image"
+        return None, None
+
     try:
-        async for raw in interaction.channel.history(limit=1):
+        sticker_hit = None  # (msg, url, name)
+        image_hit = None
+
+        # 往上多看幾則，優先貼圖
+        async for raw in interaction.channel.history(limit=15):
             try:
                 msg = await interaction.channel.fetch_message(raw.id)
             except (discord.NotFound, discord.HTTPException):
                 msg = raw
 
-            url = None
-            name = None
+            if msg.stickers and sticker_hit is None:
+                st = msg.stickers[0]
+                sticker_hit = (msg, sticker_url(st), getattr(st, "name", None) or "Sticker")
+                break  # 找到貼圖就停
 
-            if msg.stickers:
-                sticker = msg.stickers[0]
-                url = sticker_url(sticker)
-                name = getattr(sticker, "name", None) or "Sticker"
+            if image_hit is None:
+                iu, iname = pick_image(msg)
+                if iu:
+                    image_hit = (msg, iu, iname)
 
-            if not url:
-                for att in msg.attachments:
-                    if (att.content_type and att.content_type.startswith("image/")) or att.filename.lower().endswith(
-                        (".png", ".jpg", ".jpeg", ".gif", ".webp")
-                    ):
-                        url = att.url
-                        name = att.filename or "Image"
-                        break
-
-            if not url:
-                for emb in msg.embeds:
-                    if emb.image and emb.image.url:
-                        url = emb.image.url
-                        name = "Image"
-                        break
-                    if emb.thumbnail and emb.thumbnail.url:
-                        url = emb.thumbnail.url
-                        name = "Image"
-                        break
-
-            if not url:
-                logger.warning(
-                    f"[/enlargesticker] msg={msg.id} stickers={len(msg.stickers)} "
-                    f"attachments={len(msg.attachments)} embeds={len(msg.embeds)}"
-                )
-                return await interaction.followup.send(
-                    "❌ The message above has no sticker or image."
-                )
-
-            view = discord.ui.LayoutView(timeout=None)
-            container = discord.ui.Container(
-                discord.ui.TextDisplay(
-                    f"**{name}**\nFrom {msg.author.mention} · [Jump to message]({msg.jump_url})"
-                ),
-                discord.ui.MediaGallery(
-                    discord.MediaGalleryItem(media=url, description=name)
-                ),
-                discord.ui.TextDisplay(url),
-                accent_color=0x5865F2,
+        chosen = sticker_hit or image_hit
+        if not chosen:
+            return await interaction.followup.send(
+                "❌ No sticker or image found in the last 15 messages."
             )
-            view.add_item(container)
-            return await interaction.followup.send(view=view)
 
-        await interaction.followup.send("❌ No message found above.")
+        msg, url, name = chosen
+        view = discord.ui.LayoutView(timeout=None)
+        container = discord.ui.Container(
+            discord.ui.TextDisplay(
+                f"**{name}**\nFrom {msg.author.mention} · [Jump to message]({msg.jump_url})"
+            ),
+            discord.ui.MediaGallery(
+                discord.MediaGalleryItem(media=url, description=name)
+            ),
+            discord.ui.TextDisplay(url),
+            accent_color=0x5865F2,
+        )
+        view.add_item(container)
+        await interaction.followup.send(view=view)
+
     except discord.Forbidden:
         await interaction.followup.send(
             "❌ Bro I don't have permission to read message history in this channel."
