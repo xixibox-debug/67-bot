@@ -1738,99 +1738,199 @@ class AutoMuteConfigView(ui.View):
 class AnnouncementModal(ui.Modal, title="Add Time Message"):
     t_time = ui.TextInput(label="Time (HH:MM)", placeholder="08:00", max_length=5, required=True)
     msg = ui.TextInput(label="Message Content", style=discord.TextStyle.paragraph, required=True)
-    def __init__(self, view: 'TimeMessageConfigView'):
+
+    def __init__(self, view: "TimeMessageConfigView"):
         super().__init__()
         self.view = view
+
     async def on_submit(self, interaction: discord.Interaction):
-        if ":" not in self.t_time.value: return await interaction.response.send_message("Invalid time format!", ephemeral=True)
-        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-        cursor.execute("INSERT INTO announcements (time, message, channel_id) VALUES (?, ?, ?)", (self.t_time.value, self.msg.value, str(interaction.channel_id)))
-        conn.commit(); conn.close()
+        if ":" not in self.t_time.value:
+            return await interaction.response.send_message("Invalid time format!", ephemeral=True)
+        if not self.view.selected_channel_id:
+            return await interaction.response.send_message(
+                "❌ No channel selected. Close this and pick a channel first.",
+                ephemeral=True,
+            )
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO announcements (time, message, channel_id) VALUES (?, ?, ?)",
+            (self.t_time.value, self.msg.value, str(self.view.selected_channel_id)),
+        )
+        conn.commit()
+        conn.close()
         self.view.update_select_menu()
-        await interaction.response.edit_message(embed=self.view.build_embed(interaction.guild), view=self.view)
-        await interaction.followup.send(f"⏰ Auto message time set at {self.t_time.value}", ephemeral=True)
+        await interaction.response.edit_message(
+            embed=self.view.build_embed(interaction.guild), view=self.view
+        )
+        await interaction.followup.send(
+            f"⏰ Auto message set at **{self.t_time.value}** GMT → <#{self.view.selected_channel_id}>",
+            ephemeral=True,
+        )
 
 
 class TimeMessageDeleteSelect(ui.Select):
-    def __init__(self): super().__init__(placeholder="🗑️ Select an announcement schedule to CANCEL", min_values=1, max_values=1, options=[discord.SelectOption(label="Placeholder", value="none")], row=1)
+    def __init__(self):
+        super().__init__(
+            placeholder="🗑️ Select an announcement schedule to CANCEL",
+            min_values=1,
+            max_values=1,
+            options=[discord.SelectOption(label="Placeholder", value="none")],
+            row=1,
+        )
+
     async def callback(self, interaction: discord.Interaction):
-        if self.values[0] == "none": return await interaction.response.defer()
+        if self.values[0] == "none":
+            return await interaction.response.defer()
         rid = self.values[0]
-        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
         cursor.execute("DELETE FROM announcements WHERE id = ?", (rid,))
-        conn.commit(); conn.close()
+        conn.commit()
+        conn.close()
         self.view.update_select_menu()
-        await interaction.response.edit_message(embed=self.view.build_embed(interaction.guild), view=self.view)
-        await interaction.followup.send("✅ This Auto message has been cancelled.", ephemeral=True)
+        await interaction.response.edit_message(
+            embed=self.view.build_embed(interaction.guild), view=self.view
+        )
+        await interaction.followup.send(
+            "✅ This Auto message has been cancelled.", ephemeral=True
+        )
 
 
 class TimeMessageConfigView(ui.View):
     def __init__(self, guild_id: int):
         super().__init__(timeout=None)
         self.guild_id = guild_id
+        self.selected_channel_id: int | None = None
+
         enabled = is_feature_enabled(guild_id, "timemsg")
         self.toggle_enabled.label = "✅ Status: On" if enabled else "❌ Status: Off"
-        self.toggle_enabled.style = discord.ButtonStyle.success if enabled else discord.ButtonStyle.danger
+        self.toggle_enabled.style = (
+            discord.ButtonStyle.success if enabled else discord.ButtonStyle.danger
+        )
 
         if enabled:
             self.select_menu = TimeMessageDeleteSelect()
             self.add_item(self.select_menu)
             self.update_select_menu()
+
+            channel_select = ui.ChannelSelect(
+                placeholder="📢 Select channel for new Time Message",
+                channel_types=[discord.ChannelType.text],
+                row=2,
+                min_values=1,
+                max_values=1,
+            )
+            channel_select.callback = self.on_channel_select
+            self.add_item(channel_select)
         else:
             self.remove_item(self.add_time)
 
+    async def on_channel_select(self, interaction: discord.Interaction):
+        # ChannelSelect: interaction.data["values"] 是 channel id 字串
+        raw = interaction.data.get("values") or []
+        if not raw:
+            return await interaction.response.send_message(
+                "❌ No channel selected.", ephemeral=True
+            )
+        cid = int(raw[0])
+        self.selected_channel_id = cid
+        ch = interaction.guild.get_channel(cid) if interaction.guild else None
+        mention = ch.mention if ch else f"<#{cid}>"
+        await interaction.response.send_message(
+            f"✅ Target channel set to {mention}. Now press **Add Time Message**.",
+            ephemeral=True,
+        )
+
     def update_select_menu(self):
-        conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
         cursor.execute("SELECT id, time, message, channel_id FROM announcements")
-        all_rows = cursor.fetchall(); conn.close()
+        all_rows = cursor.fetchall()
+        conn.close()
         valid_options = []
         for rid, t_time, msg, cid in all_rows:
             channel = bot.get_channel(int(cid))
             if channel and channel.guild.id == self.guild_id:
                 short_msg = msg[:20] + "..." if len(msg) > 20 else msg
-                valid_options.append(discord.SelectOption(label=f"[{t_time}] {short_msg}", value=str(rid)))
+                valid_options.append(
+                    discord.SelectOption(
+                        label=f"[{t_time}] #{channel.name} {short_msg}"[:100],
+                        value=str(rid),
+                    )
+                )
         if valid_options:
             self.select_menu.options = valid_options[:25]
             self.select_menu.disabled = False
         else:
-            self.select_menu.options = [discord.SelectOption(label="No scheduled announcements", value="none")]
+            self.select_menu.options = [
+                discord.SelectOption(label="No scheduled announcements", value="none")
+            ]
             self.select_menu.disabled = True
 
     def build_embed(self, guild: discord.Guild) -> discord.Embed:
         enabled = is_feature_enabled(self.guild_id, "timemsg")
-        embed = discord.Embed(title="⏰ Auto Time Message Settings", color=0x3498db if enabled else 0x2b2d31)
+        embed = discord.Embed(
+            title="⏰ Auto Time Message Settings",
+            color=0x3498db if enabled else 0x2b2d31,
+        )
         if not enabled:
             embed.description = "Status: **off**"
         else:
-            conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
             cursor.execute("SELECT time, message, channel_id FROM announcements")
-            all_rows = cursor.fetchall(); conn.close()
+            all_rows = cursor.fetchall()
+            conn.close()
             lines = []
             for t_time, msg, cid in all_rows:
                 channel = bot.get_channel(int(cid))
                 if channel and channel.guild.id == self.guild_id:
                     short_msg = msg[:30] + "..." if len(msg) > 30 else msg
-                    lines.append(f"{t_time} GMT {short_msg}")
+                    lines.append(f"{t_time} GMT → #{channel.name} | {short_msg}")
             sched_text = "\n".join(lines) if lines else "Not set"
-            embed.description = f"Status: **on**\n\n**Now schedule:**\n```\n{sched_text}\n```"
+            target = (
+                f"<#{self.selected_channel_id}>"
+                if self.selected_channel_id
+                else "(not selected)"
+            )
+            embed.description = (
+                f"Status: **on**\n"
+                f"Next message channel: {target}\n\n"
+                f"**Now schedule:**\n```\n{sched_text}\n```"
+            )
         embed.set_footer(text=f"{guild.name}｜67")
         return embed
 
     @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=0)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
-        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message")
+        embed = discord.Embed(
+            title="Settings",
+            color=0xdfe600,
+            description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message",
+        )
         embed.set_footer(text=f"{interaction.guild.name}｜67")
-        await interaction.response.edit_message(embed=embed, view=SettingsView(interaction.guild_id))
+        await interaction.response.edit_message(
+            embed=embed, view=SettingsView(interaction.guild_id)
+        )
 
     @ui.button(label="❌ Status: Off", style=discord.ButtonStyle.danger, row=0)
     async def toggle_enabled(self, interaction: discord.Interaction, button: ui.Button):
         cur = is_feature_enabled(self.guild_id, "timemsg")
         set_feature_enabled(self.guild_id, "timemsg", not cur)
         new_view = TimeMessageConfigView(interaction.guild_id)
-        await interaction.response.edit_message(embed=new_view.build_embed(interaction.guild), view=new_view)
+        await interaction.response.edit_message(
+            embed=new_view.build_embed(interaction.guild), view=new_view
+        )
 
     @ui.button(label="⏰ Add Time Message", style=discord.ButtonStyle.success, row=0)
-    async def add_time(self, interaction: discord.Interaction, button: ui.Button): await interaction.response.send_modal(AnnouncementModal(self))
+    async def add_time(self, interaction: discord.Interaction, button: ui.Button):
+        if not self.selected_channel_id:
+            return await interaction.response.send_message(
+                "❌ Please select a channel first (dropdown below).",
+                ephemeral=True,
+            )
+        await interaction.response.send_modal(AnnouncementModal(self))
 
 class WarnModal(ui.Modal, title="Send a Warning"):
     reason = ui.TextInput(label="Warning message", style=discord.TextStyle.long, required=True, max_length=1000)
@@ -3984,57 +4084,69 @@ async def on_message(message: discord.Message):
             globals()['active_ai_tasks'][message.id] = (asyncio.current_task(), user_id)
 
             async with message.channel.typing():
-                
+
                 # -----------------------------------------------------------
                 # 🧠 核心邏輯：動態爬軌跡，最多回溯 10 則、只要是回覆就算數，不限時間
                 # -----------------------------------------------------------
                 conversation_history = []
                 current_ref = message.reference
                 history_count = 0
-                
+
                 logger.info("🔍 開始追溯單獨連貫的回覆鏈...")
                 while current_ref and current_ref.message_id and history_count < 10:
                     try:
                         ref_msg = await message.channel.fetch_message(current_ref.message_id)
-                        
-                        # 解析並清理內容，依照身份貼上標籤
+
                         if ref_msg.author.id == bot.user.id:
                             role = "assistant"
-                            # 拔除舊回應底部的 67 免責聲明，避免干擾 AI
                             content = ref_msg.content.split("\n\n-# **67+AI")[0].split("\n\n-# 67+AI")[0].split("\n\n67+AI")[0].strip()
                         else:
                             role = "user"
                             content = ref_msg.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
-                        
-                        # 💡 關鍵：使用 insert(0, ...) 確保越古老的訊息排在陣列越前面，符合聊天紀錄順序
+
                         conversation_history.insert(0, {"role": role, "content": content})
                         history_count += 1
-                        
-                        # 繼續向上尋找該訊息是否有「更上一層的回覆目標」
                         current_ref = ref_msg.reference
-                        
+
                     except Exception as chain_err:
                         logger.warning(f"⚠️ 無法獲取回覆鏈中某個節點的訊息 (可能被刪除): {chain_err}")
-                        break # 連貫中斷，直接跳出
-                
+                        break
+
                 logger.info(f"✨ 成功載入 {history_count} 則連貫上下文記憶！")
 
-                # 🕵️ 只有在真實伺服器頻道、對方是真的成員時才開放 Agent 工具（私訊/個人安裝情境不給）
                 use_tools = message.guild is not None and isinstance(message.author, discord.Member)
 
-                # 🌐 優化 Tavily 搜尋關鍵字：如果有歷史故事，結合「故事起點(最早的提問)」與「最新提問」送去搜尋
                 if conversation_history:
                     search_query = f"{conversation_history[0]['content']} {clean_content}"
                 else:
                     search_query = clean_content
-                
-                # 呼叫 Tavily 進行非同步網路搜尋
+
                 search_context = await tavily_search(search_query)
 
-                # 🧱 組合 System、故事歷史與本次提問
+                # 判斷這次有沒有真正的連網結果（失敗／沒 key 都不算有連網）
+                _no_search_markers = (
+                    "未提供連網搜尋資料",
+                    "網路搜尋不到相關結果",
+                    "搜尋失敗",
+                    "搜尋時發生錯誤",
+                )
+                has_web_search = bool(search_context) and not any(
+                    m in search_context for m in _no_search_markers
+                )
+
+                # 共用：禁止模型否認連網；有 Tavily 結果就當即時資訊用
+                web_search_instruction = (
+                    "You ARE given real-time web search results below (from Tavily). "
+                    "Treat them as current internet information when answering. "
+                    "NEVER say you cannot browse the web, cannot search the internet, or lack internet access. "
+                    "If the block says no data / search failed / key missing, say you don't have enough live info for that topic — "
+                    "do NOT claim you have no browsing ability.\n\n"
+                    f"【請優先參考以下網路即時資訊回答】：\n{search_context}"
+                )
+
                 ai_messages = [
                     {
-                        "role": "system", 
+                        "role": "system",
                         "content": (
                             "You are an AI model in a Discord bot called '67'. You like to say 67 (but don't say it too often) and respond just like Meta AI. "
                             "Drop the corporate PR tone, be direct, slightly witty. "
@@ -4043,8 +4155,9 @@ async def on_message(message: discord.Message):
                             "If the conversation clearly describes someone misbehaving (annoying, spamming, toxic, etc), take an appropriate "
                             "action yourself (e.g. a short mute) instead of just talking about it. "
                             f"{await build_target_candidates(message)}\n\n"
-                            "Use ENGLISH to response. but if the user use chinese, u should use TRADITIONAL CHINESE to response. DONT use Simplified chinese. Max 800 characters.\n\n"
-                            f"【請優先參考以下網路即時資訊回答】：\n{search_context}"
+                            "Use ENGLISH to response. but if the user use chinese, u should use TRADITIONAL CHINESE to response. "
+                            "DONT use Simplified chinese. Max 800 characters.\n\n"
+                            f"{web_search_instruction}"
                         )
                     }
                 ]
@@ -4062,14 +4175,15 @@ async def on_message(message: discord.Message):
 
                 ai_reply = None
                 tool_embeds = []
-                
+
                 # ===========================================================
                 # 🛡️ ⚔️ 三陣營火線防禦機制 (Kimi -> Gemini -> Groq)
                 # ===========================================================
-                used_provider = None  # 💡 用於追蹤是哪一個模型成功回應
+                used_provider = None
 
                 # ───【第一防線：Kimi（Moonshot）】───
-                if os.getenv("MOONSHOT_API_KEY") and not ai_reply:
+                # 與 kimi_client 一致：用 KIMI_API_KEY（若你 .env 只有 MOONSHOT_API_KEY 也可二擇一）
+                if (os.getenv("KIMI_API_KEY") or os.getenv("MOONSHOT_API_KEY")) and not ai_reply:
                     if is_political_topic(clean_content):
                         logger.info("🚫 [第一防線] 偵測到政治相關內容，跳過 Kimi（中國模型），直接進下一防線")
                     else:
@@ -4090,7 +4204,7 @@ async def on_message(message: discord.Message):
                                         f"{await build_target_candidates(message)}\n\n"
                                         "Use ENGLISH to response. but if the user use chinese, u should use TRADITIONAL CHINESE "
                                         "to response. DONT use Simplified chinese. Max 800 characters.\n\n"
-                                        f"【請優先參考以下網路即時資訊回答】：\n{search_context}"
+                                        f"{web_search_instruction}"
                                     )
                                 }
                             ]
@@ -4117,7 +4231,14 @@ async def on_message(message: discord.Message):
 
                 # ───【第二防線：直連 Google Gemini API 輪詢機制】───
                 if os.getenv("GEMINI_API_KEY") and not ai_reply:
-                    gemini_models = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3-flash", "gemini-2.5-flash", "gmeini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+                    gemini_models = [
+                        "gemini-3.6-flash",
+                        "gemini-3.5-flash",
+                        "gemini-3-flash",
+                        "gemini-2.5-flash",
+                        "gemini-3.5-flash-lite",
+                        "gemini-3.1-flash-lite",
+                    ]
                     for model_name in gemini_models:
                         try:
                             logger.info(f"🤖 [2/3] 請求直連 Gemini API ({model_name})...")
@@ -4126,67 +4247,97 @@ async def on_message(message: discord.Message):
                             )
                             if ai_reply:
                                 logger.info(f"✨ [第二防線] 直連 Gemini ({model_name}) 成功救援故事！")
-                                if model_name in ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3-flash", "gemini-2.5-flash"]:
+                                if model_name in [
+                                    "gemini-3.6-flash",
+                                    "gemini-3.5-flash",
+                                    "gemini-3-flash",
+                                    "gemini-2.5-flash",
+                                ]:
                                     used_provider = "gemini_loop"
-                                elif model_name in ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]:
+                                else:
                                     used_provider = "gemini_lite"
-                                break  # 成功取得回應，跳出 Gemini 輪詢
+                                break
                         except Exception as gemini_err:
-                            logger.warning(f"⚠️ [第二防線] Gemini ({model_name}) 直連失敗: {gemini_err}，準備切換下一順位...")
+                            logger.warning(
+                                f"⚠️ [第二防線] Gemini ({model_name}) 直連失敗: {gemini_err}，準備切換下一順位..."
+                            )
 
                 # ───【第三防線：Groq API 終極備援】───
                 if not ai_reply:
                     try:
-                        logger.info("🤖 [3/3] 前方失敗！觸發最終底線，請求 Groq API (llama-3.3-70b-versatile)...")
+                        logger.info(
+                            "🤖 [3/3] 前方失敗！觸發最終底線，請求 Groq API (llama-3.3-70b-versatile)..."
+                        )
                         ai_reply, tool_embeds = await run_agent_completion(
-                            groq_client, "llama-3.3-70b-versatile", ai_messages, message.guild, message.author, use_tools, max_tokens=600
+                            groq_client,
+                            "llama-3.3-70b-versatile",
+                            ai_messages,
+                            message.guild,
+                            message.author,
+                            use_tools,
+                            max_tokens=600,
                         )
                         if ai_reply:
                             logger.info("✨ [第三防線] Groq 終極防線救援成功！")
                             used_provider = "groq"
                     except Exception as groq_err:
                         logger.error(f"❌ [第三防線] Groq 也失敗了: {groq_err}")
-                # ───【🚨 終極檢查：全線癱瘓防範】───
+
                 if not ai_reply:
                     logger.error("❌ [核心崩潰] Kimi、Gemini 與 Groq API 管道於本次請求中全數癱瘓。")
                     await message.reply("❌ 67+AI suck. Try again later.")
                     return
 
-                # 安全字數截斷（僅針對 Groq/Kimi 進行截斷，Gemini 回覆不用砍字數）
                 if used_provider not in ["gemini_loop", "gemini_lite"] and len(ai_reply) > 700:
                     ai_reply = ai_reply[:697] + "..."
 
-                # 🎯 決定浮水印文字：真的有觸發 Agent 動作才用新版 Agent 浮水印，單純聊天維持原本各防線的浮水印
+                no_net = "" if has_web_search else ", No internet search"
+
                 if tool_embeds:
-                    watermark = "-# **67+Agent (Beta)** Powered by 67+AI. 67+AI suck, it might be disorder."
+                    watermark = (
+                        f"-# **67+Agent (Beta**{no_net}**)** Powered by 67+AI. "
+                        "67+AI suck, it might be disorder."
+                    )
                 else:
                     if used_provider == "gemini_loop":
-                        watermark = "-# **67+AI (2.7 loop)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
+                        watermark = (
+                            f"-# **67+AI (2.7 loop{no_net})**｜"
+                            "67+AI suck and frequently makes mistakes; please verify it yourself."
+                        )
                     elif used_provider == "gemini_lite":
-                        watermark = "-# **67+AI (2.5a)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
+                        watermark = (
+                            f"-# **67+AI (2.5a{no_net})**｜"
+                            "67+AI suck and frequently makes mistakes; please verify it yourself."
+                        )
                     elif used_provider == "groq":
-                        watermark = "-# **67+AI (1)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
+                        watermark = (
+                            f"-# **67+AI (1{no_net})**｜"
+                            "67+AI suck and frequently makes mistakes; please verify it yourself."
+                        )
                     elif used_provider == "kimi":
-                        watermark = "-# **67+AI (3)**｜67+AI suck and frequently makes mistakes; please verify it yourself."
+                        watermark = (
+                            f"-# **67+AI (3{no_net})**｜"
+                            "67+AI suck and frequently makes mistakes; please verify it yourself."
+                        )
                     else:
-                        watermark = "-# 67+AI suck and frequently makes mistakes; please verify it yourself."
+                        watermark = (
+                            f"-# 67+AI{no_net} suck and frequently makes mistakes; please verify it yourself."
+                        )
 
-                # 🎯 文字、嵌入、浮水印全部塞在同一則訊息、一次送出，避免分開發送時順序錯亂或回覆錯訊息
                 final_content = f"{ai_reply}\n\n{watermark}"
                 try:
-                    await message.reply(content=final_content, embeds=tool_embeds[:10])  # Discord 一則訊息最多 10 個嵌入
+                    await message.reply(content=final_content, embeds=tool_embeds[:10])
                 except Exception as e:
                     logger.error(f"[Agent 回覆發送失敗]: {e}")
-
-                return  # 結束事件，不觸發後續 XP 增加系統
+                return
 
         except Exception as e:
             logger.error(f"❌ AI 處理過程發生錯誤: {e}")
-            
+
         finally:
-            # 確保無論成功或發生異常，都會將任務從全域追蹤清單中移除
             if 'active_ai_tasks' in globals() and message.id in globals()['active_ai_tasks']:
                 globals()['active_ai_tasks'].pop(message.id, None)
+
     # 🎯 以下都是伺服器限定功能（自動禁言、67 統計、等級、Streaks），私訊沒有 guild，到此為止
     if not message.guild:
         return
