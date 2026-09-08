@@ -1846,44 +1846,185 @@ class AutoMuteConfigView(ui.View):
         new_view = AutoMuteConfigView(interaction.guild_id)
         await interaction.response.edit_message(embed=new_view.build_embed(interaction.guild), view=new_view)
 
-class AnnouncementModal(ui.Modal, title="Add Time Message"):
-    t_time = ui.TextInput(label="Time (HH:MM)", placeholder="08:00", max_length=5, required=True)
-    msg = ui.TextInput(label="Message Content", style=discord.TextStyle.paragraph, required=True)
+# Time Message timezones: (label, UTC offset hours)
+TIME_MESSAGE_TIMEZONES = [
+    ("UTC+0 (GMT)", 0),
+    ("UTC+8 (Taiwan / China / HK / SG)", 8),
+    ("UTC+9 (Japan / Korea)", 9),
+    ("UTC+7 (Thailand / Vietnam)", 7),
+    ("UTC+1 (CET)", 1),
+    ("UTC-5 (US Eastern)", -5),
+    ("UTC-8 (US Pacific)", -8),
+]
 
-    def __init__(self, view: "TimeMessageConfigView"):
+
+def _local_hhmm_to_utc(hhmm: str, offset_hours: int) -> str | None:
+    """Convert HH:MM in a given UTC offset to HH:MM in UTC."""
+    try:
+        parts = hhmm.strip().split(":")
+        if len(parts) != 2:
+            return None
+        h, m = int(parts[0]), int(parts[1])
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            return None
+        local_tz = datetime.timezone(datetime.timedelta(hours=offset_hours))
+        local_dt = datetime.datetime(2000, 1, 1, h, m, tzinfo=local_tz)
+        return local_dt.astimezone(datetime.timezone.utc).strftime("%H:%M")
+    except Exception:
+        return None
+
+
+class AnnouncementModal(ui.Modal, title="Add Time Message"):
+    t_time = ui.TextInput(
+        label="Time (HH:MM)",
+        placeholder="08:00",
+        max_length=5,
+        required=True,
+    )
+    msg = ui.TextInput(
+        label="Message Content",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=2000,
+    )
+
+    def __init__(
+        self,
+        parent_view: "TimeMessageConfigView",
+        channel_id: int,
+        tz_offset: int,
+        tz_label: str,
+    ):
         super().__init__()
-        self.view = view
+        self.parent_view = parent_view
+        self.channel_id = channel_id
+        self.tz_offset = tz_offset
+        self.tz_label = tz_label
 
     async def on_submit(self, interaction: discord.Interaction):
-        if ":" not in self.t_time.value:
-            return await interaction.response.send_message("Invalid time format!", ephemeral=True)
-        if not self.view.selected_channel_id:
+        raw = (self.t_time.value or "").strip()
+        utc_time = _local_hhmm_to_utc(raw, self.tz_offset)
+        if not utc_time:
             return await interaction.response.send_message(
-                "❌ No channel selected. Close this and pick a channel first.",
+                "❌ Invalid time. Use HH:MM (00:00–23:59).",
                 ephemeral=True,
             )
+        text = (self.msg.value or "").strip()
+        if not text:
+            return await interaction.response.send_message(
+                "❌ Message cannot be empty.",
+                ephemeral=True,
+            )
+
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO announcements (time, message, channel_id) VALUES (?, ?, ?)",
-            (self.t_time.value, self.msg.value, str(self.view.selected_channel_id)),
+            (utc_time, text, str(self.channel_id)),
         )
         conn.commit()
         conn.close()
-        self.view.update_select_menu()
+
+        main = TimeMessageConfigView(self.parent_view.guild_id)
         await interaction.response.edit_message(
-            embed=self.view.build_embed(interaction.guild), view=self.view
+            embed=main.build_embed(interaction.guild),
+            view=main,
         )
         await interaction.followup.send(
-            f"⏰ Auto message set at **{self.t_time.value}** GMT → <#{self.view.selected_channel_id}>",
+            f"⏰ Scheduled **{raw}** ({self.tz_label}) = **{utc_time} UTC** → <#{self.channel_id}>",
             ephemeral=True,
+        )
+
+
+class TimeMessageTimezoneSelect(ui.Select):
+    def __init__(self, parent_view: "TimeMessageConfigView", channel_id: int):
+        options = [
+            discord.SelectOption(label=label[:100], value=str(offset))
+            for label, offset in TIME_MESSAGE_TIMEZONES
+        ]
+        super().__init__(
+            placeholder="Select timezone…",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+        self.parent_view = parent_view
+        self.channel_id = channel_id
+
+    async def callback(self, interaction: discord.Interaction):
+        offset = int(self.values[0])
+        label = next(
+            (lb for lb, off in TIME_MESSAGE_TIMEZONES if off == offset),
+            f"UTC{offset:+d}",
+        )
+        await interaction.response.send_modal(
+            AnnouncementModal(self.parent_view, self.channel_id, offset, label)
+        )
+
+
+class TimeMessageTimezoneView(ui.View):
+    def __init__(self, parent_view: "TimeMessageConfigView", channel_id: int):
+        super().__init__(timeout=180)
+        self.parent_view = parent_view
+        self.add_item(TimeMessageTimezoneSelect(parent_view, channel_id))
+
+    @ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=1)
+    async def cancel(self, interaction: discord.Interaction, button: ui.Button):
+        main = TimeMessageConfigView(self.parent_view.guild_id)
+        await interaction.response.edit_message(
+            embed=main.build_embed(interaction.guild),
+            view=main,
+        )
+
+
+class TimeMessageChannelSelect(ui.ChannelSelect):
+    def __init__(self, parent_view: "TimeMessageConfigView"):
+        super().__init__(
+            placeholder="Select channel for this Time Message",
+            channel_types=[discord.ChannelType.text],
+            min_values=1,
+            max_values=1,
+            row=0,
+        )
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: discord.Interaction):
+        channel = self.values[0]
+        embed = discord.Embed(
+            title="Add Time Message — Step 2/3",
+            description=(
+                f"Channel: {channel.mention}\n\n"
+                f"Next: **select timezone**, then enter time and message."
+            ),
+            color=0x3498db,
+        )
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
+        await interaction.response.edit_message(
+            embed=embed,
+            view=TimeMessageTimezoneView(self.parent_view, channel.id),
+        )
+
+
+class TimeMessageChannelView(ui.View):
+    def __init__(self, parent_view: "TimeMessageConfigView"):
+        super().__init__(timeout=180)
+        self.parent_view = parent_view
+        self.add_item(TimeMessageChannelSelect(parent_view))
+
+    @ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=1)
+    async def cancel(self, interaction: discord.Interaction, button: ui.Button):
+        main = TimeMessageConfigView(self.parent_view.guild_id)
+        await interaction.response.edit_message(
+            embed=main.build_embed(interaction.guild),
+            view=main,
         )
 
 
 class TimeMessageDeleteSelect(ui.Select):
     def __init__(self):
         super().__init__(
-            placeholder="🗑️ Select an announcement schedule to CANCEL",
+            placeholder="Select a schedule to cancel",
             min_values=1,
             max_values=1,
             options=[discord.SelectOption(label="Placeholder", value="none")],
@@ -1901,10 +2042,12 @@ class TimeMessageDeleteSelect(ui.Select):
         conn.close()
         self.view.update_select_menu()
         await interaction.response.edit_message(
-            embed=self.view.build_embed(interaction.guild), view=self.view
+            embed=self.view.build_embed(interaction.guild),
+            view=self.view,
         )
         await interaction.followup.send(
-            "✅ This Auto message has been cancelled.", ephemeral=True
+            "✅ This auto message has been cancelled.",
+            ephemeral=True,
         )
 
 
@@ -1912,7 +2055,6 @@ class TimeMessageConfigView(ui.View):
     def __init__(self, guild_id: int):
         super().__init__(timeout=None)
         self.guild_id = guild_id
-        self.selected_channel_id: int | None = None
 
         enabled = is_feature_enabled(guild_id, "timemsg")
         self.toggle_enabled.label = "✅ Status: On" if enabled else "❌ Status: Off"
@@ -1924,34 +2066,8 @@ class TimeMessageConfigView(ui.View):
             self.select_menu = TimeMessageDeleteSelect()
             self.add_item(self.select_menu)
             self.update_select_menu()
-
-            channel_select = ui.ChannelSelect(
-                placeholder="📢 Select channel for new Time Message",
-                channel_types=[discord.ChannelType.text],
-                row=2,
-                min_values=1,
-                max_values=1,
-            )
-            channel_select.callback = self.on_channel_select
-            self.add_item(channel_select)
         else:
             self.remove_item(self.add_time)
-
-    async def on_channel_select(self, interaction: discord.Interaction):
-        # ChannelSelect: interaction.data["values"] 是 channel id 字串
-        raw = interaction.data.get("values") or []
-        if not raw:
-            return await interaction.response.send_message(
-                "❌ No channel selected.", ephemeral=True
-            )
-        cid = int(raw[0])
-        self.selected_channel_id = cid
-        ch = interaction.guild.get_channel(cid) if interaction.guild else None
-        mention = ch.mention if ch else f"<#{cid}>"
-        await interaction.response.send_message(
-            f"✅ Target channel set to {mention}. Now press **Add Time Message**.",
-            ephemeral=True,
-        )
 
     def update_select_menu(self):
         conn = sqlite3.connect(DB_PATH)
@@ -1966,7 +2082,7 @@ class TimeMessageConfigView(ui.View):
                 short_msg = msg[:20] + "..." if len(msg) > 20 else msg
                 valid_options.append(
                     discord.SelectOption(
-                        label=f"[{t_time}] #{channel.name} {short_msg}"[:100],
+                        label=f"[{t_time} UTC] #{channel.name} {short_msg}"[:100],
                         value=str(rid),
                     )
                 )
@@ -1998,31 +2114,30 @@ class TimeMessageConfigView(ui.View):
                 channel = bot.get_channel(int(cid))
                 if channel and channel.guild.id == self.guild_id:
                     short_msg = msg[:30] + "..." if len(msg) > 30 else msg
-                    lines.append(f"{t_time} GMT → #{channel.name} | {short_msg}")
+                    lines.append(f"{t_time} UTC → #{channel.name} | {short_msg}")
             sched_text = "\n".join(lines) if lines else "Not set"
-            target = (
-                f"<#{self.selected_channel_id}>"
-                if self.selected_channel_id
-                else "(not selected)"
-            )
             embed.description = (
-                f"Status: **on**\n"
-                f"Next message channel: {target}\n\n"
-                f"**Now schedule:**\n```\n{sched_text}\n```"
+                f"Status: **on**\n\n"
+                f"**Schedule (times stored as UTC):**\n```\n{sched_text}\n```\n"
+                f"Press **Add Time Message** → channel → timezone → time & message."
             )
         embed.set_footer(text=f"{guild.name}｜67")
         return embed
 
-    @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=0)
+    @ui.button(label="Back", style=discord.ButtonStyle.secondary, row=0)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
         embed = discord.Embed(
             title="Settings",
             color=0xdfe600,
-            description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message\nCustomize profile",
+            description=(
+                "Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\n"
+                "Auto Mute\nTime Message\nCustomize profile"
+            ),
         )
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(
-            embed=embed, view=SettingsView(interaction.guild_id)
+            embed=embed,
+            view=SettingsView(interaction.guild_id),
         )
 
     @ui.button(label="❌ Status: Off", style=discord.ButtonStyle.danger, row=0)
@@ -2031,18 +2146,22 @@ class TimeMessageConfigView(ui.View):
         set_feature_enabled(self.guild_id, "timemsg", not cur)
         new_view = TimeMessageConfigView(interaction.guild_id)
         await interaction.response.edit_message(
-            embed=new_view.build_embed(interaction.guild), view=new_view
+            embed=new_view.build_embed(interaction.guild),
+            view=new_view,
         )
 
     @ui.button(label="⏰ Add Time Message", style=discord.ButtonStyle.success, row=0)
     async def add_time(self, interaction: discord.Interaction, button: ui.Button):
-        if not self.selected_channel_id:
-            return await interaction.response.send_message(
-                "❌ Please select a channel first (dropdown below).",
-                ephemeral=True,
-            )
-        await interaction.response.send_modal(AnnouncementModal(self))
-
+        embed = discord.Embed(
+            title="Add Time Message — Step 1/3",
+            description="Select the **channel** where the message will be posted.",
+            color=0x3498db,
+        )
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
+        await interaction.response.edit_message(
+            embed=embed,
+            view=TimeMessageChannelView(self),
+        )
 class AIConfigView(ui.View):
     def __init__(self, guild_id: int):
         super().__init__(timeout=None)
