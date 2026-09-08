@@ -2191,8 +2191,6 @@ class AIConfigView(ui.View):
             )
             ch_select.callback = self.on_channel_select
             self.add_item(ch_select)
-        else:
-            self.remove_item(self.pick_channel_hint)  # 若你沒有這個按鈕可刪此行
 
     def build_embed(self, guild: discord.Guild) -> discord.Embed:
         ai_on = is_ai_enabled(self.guild_id)
@@ -2801,56 +2799,56 @@ class SettingsView(ui.View):
         btn.style = discord.ButtonStyle.success if new_state else discord.ButtonStyle.secondary
         await interaction.response.edit_message(view=self)
 
-    def is_ai_enabled(guild_id) -> bool:
-        """67+AI 總開關，預設開啟。"""
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT enabled FROM feature_toggles WHERE guild_id = ? AND feature = ?",
-            (str(guild_id), "ai67"),
-        )
-        row = cursor.fetchone()
-        conn.close()
-        return (row[0] == 1) if row else True  # 預設 On
+def is_ai_enabled(guild_id) -> bool:
+    """67+AI 總開關，預設開啟。"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT enabled FROM feature_toggles WHERE guild_id = ? AND feature = ?",
+        (str(guild_id), "ai67"),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return (row[0] == 1) if row else True  # 預設 On
     
     
-    def get_ai_channel_mode(guild_id) -> tuple[bool, str | None]:
-        """回傳 (only_selected, channel_id)。"""
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT only_selected, channel_id FROM ai_settings WHERE guild_id = ?",
-            (str(guild_id),),
-        )
-        row = cursor.fetchone()
-        conn.close()
-        if not row:
-            return False, None
-        return bool(row[0]), row[1]
+def get_ai_channel_mode(guild_id) -> tuple[bool, str | None]:
+    """回傳 (only_selected, channel_id)。"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT only_selected, channel_id FROM ai_settings WHERE guild_id = ?",
+        (str(guild_id),),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return False, None
+    return bool(row[0]), row[1]
     
     
-    def set_ai_only_selected(guild_id, enabled: bool):
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO ai_settings (guild_id, only_selected) VALUES (?, ?) "
-            "ON CONFLICT(guild_id) DO UPDATE SET only_selected = excluded.only_selected",
-            (str(guild_id), 1 if enabled else 0),
-        )
-        conn.commit()
-        conn.close()
-    
-    
-    def set_ai_channel(guild_id, channel_id: str | None):
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO ai_settings (guild_id, channel_id) VALUES (?, ?) "
-            "ON CONFLICT(guild_id) DO UPDATE SET channel_id = excluded.channel_id",
-            (str(guild_id), channel_id),
-        )
-        conn.commit()
-        conn.close()
+def set_ai_only_selected(guild_id, enabled: bool):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO ai_settings (guild_id, only_selected) VALUES (?, ?) "
+        "ON CONFLICT(guild_id) DO UPDATE SET only_selected = excluded.only_selected",
+        (str(guild_id), 1 if enabled else 0),
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_ai_channel(guild_id, channel_id: str | None):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO ai_settings (guild_id, channel_id) VALUES (?, ?) "
+        "ON CONFLICT(guild_id) DO UPDATE SET channel_id = excluded.channel_id",
+        (str(guild_id), channel_id),
+    )
+    conn.commit()
+    conn.close()
 
 # =================================================================
 # 🚀 6. SLASH COMMANDS
@@ -4554,18 +4552,15 @@ async def on_message_delete(message):
 
 @bot.event
 async def on_message(message: discord.Message):
-    # 排除機器人自己的訊息
     if message.author.bot:
         return
 
-    # 🎯 標記監聽器（Groq API 完美非同步版，支援單純標記與回覆標記）
-    # 這段刻意放在「伺服器限定」判斷之前，讓私訊（個人安裝情境）也能 @ 機器人問問題
-        # ----- 67+AI 觸發條件 -----
-trigger_ai = False
+    # ----- 67+AI trigger -----
+    trigger_ai = False
     require_mention = True
 
     if message.guild is None:
-        # 私訊：一定收得到訊息；不需 @（回覆預設也不會 mention）
+        # DM: no @ required
         trigger_ai = True
         require_mention = False
     else:
@@ -4591,31 +4586,16 @@ trigger_ai = False
                     trigger_ai = False
 
     if trigger_ai:
-        if require_mention:
-            clean_content = (
-                message.content
-                .replace(f"<@{bot.user.id}>", "")
-                .replace(f"<@!{bot.user.id}>", "")
-                .strip()
-            )
-        else:
-            # 私訊 / 免 @ 頻道：整段內容；若有人仍 @ 了就拔掉 mention
-            clean_content = (
-                (message.content or "")
-                .replace(f"<@{bot.user.id}>", "")
-                .replace(f"<@!{bot.user.id}>", "")
-                .strip()
-            )
-        else:
-            # 免 @ 模式：整句當問題；略過空訊息、純指令可選
-            clean_content = (message.content or "").strip()
-            if not clean_content and not message.attachments:
-                return
-            # 可選：略過 slash 顯示用的空內容、或太短
-            if clean_content.startswith("//"):  # 自訂忽略前綴可再調
-                return
+        clean_content = (
+            (message.content or "")
+            .replace(f"<@{bot.user.id}>", "")
+            .replace(f"<@!{bot.user.id}>", "")
+            .strip()
+        )
+        if not require_mention and not clean_content and not message.attachments:
+            return
 
-        # 下面接你原本的 image_url / 字數 / cooldown / AI 呼叫...
+        # image_url / word limit / cooldown / AI call... (keep your existing code below)
         # 🧹 拔除訊息中的機器人標籤與前後空格
         clean_content = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
 
