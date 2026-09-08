@@ -677,12 +677,19 @@ def init_db():
             PRIMARY KEY (guild_id, feature)
         )
     """)
-    # 💰 付費解鎖清單（例如「67+Slient」解除自動回覆 67 的限制），只能靠開發者手動新增
+    # 💰 付費解鎖清單（例如「67+Silent」解除自動回覆 67 的限制），只能靠開發者手動新增
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS paid_features (
             guild_id TEXT,
             feature TEXT,
             PRIMARY KEY (guild_id, feature)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS guild_bot_profile (
+            guild_id TEXT PRIMARY KEY,
+            nick TEXT,
+            bio TEXT
         )
     """)
     # 🔥 新增：Streaks 系統
@@ -746,6 +753,14 @@ def init_db():
             bots_id TEXT,
             bans_id TEXT,
             mutes_id TEXT
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS ai_settings (
+            guild_id TEXT PRIMARY KEY,
+            only_selected INTEGER DEFAULT 0,
+            channel_id TEXT
         )
     """)
     conn.commit()
@@ -821,6 +836,95 @@ def is_paid_guild(guild_id, feature: str) -> bool:
     cursor.execute("SELECT 1 FROM paid_features WHERE guild_id = ? AND feature = ?", (str(guild_id), feature))
     row = cursor.fetchone(); conn.close()
     return row is not None
+
+import base64
+
+_PROFILE_MAX_BYTES = 2 * 1024 * 1024
+_PROFILE_IMAGE_RULES = {
+    ".png": ("image/png", lambda b: b.startswith(b"\x89PNG\r\n\x1a\n")),
+    ".jpg": ("image/jpeg", lambda b: b.startswith(b"\xff\xd8\xff")),
+    ".jpeg": ("image/jpeg", lambda b: b.startswith(b"\xff\xd8\xff")),
+    ".gif": ("image/gif", lambda b: b.startswith((b"GIF87a", b"GIF89a"))),
+    ".webp": (
+        "image/webp",
+        lambda b: len(b) >= 12 and b.startswith(b"RIFF") and b[8:12] == b"WEBP",
+    ),
+}
+
+def get_guild_bot_profile(guild_id) -> tuple[str, str]:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT nick, bio FROM guild_bot_profile WHERE guild_id = ?",
+        (str(guild_id),),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return "", ""
+    return (row[0] or "", row[1] or "")
+
+def save_guild_bot_profile(guild_id, nick: str | None, bio: str | None):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO guild_bot_profile (guild_id, nick, bio) VALUES (?, ?, ?) "
+        "ON CONFLICT(guild_id) DO UPDATE SET nick = excluded.nick, bio = excluded.bio",
+        (str(guild_id), nick or "", bio or ""),
+    )
+    conn.commit()
+    conn.close()
+
+def _validate_profile_image(data: bytes, filename: str, content_type: str | None) -> str | None:
+    if not data:
+        return "❌ Empty file."
+    if len(data) > _PROFILE_MAX_BYTES:
+        return f"❌ Image too large (max {_PROFILE_MAX_BYTES // 1024}KB)."
+    name = (filename or "").lower()
+    ext = next((e for e in _PROFILE_IMAGE_RULES if name.endswith(e)), None)
+    if not ext:
+        return "❌ Only png / jpg / jpeg / gif / webp allowed."
+    expected_mime, magic_ok = _PROFILE_IMAGE_RULES[ext]
+    ct = (content_type or "").lower().split(";")[0].strip()
+    if ct and ct not in ("application/octet-stream",) and not (
+        ct == expected_mime or ct.startswith("image/")
+    ):
+        return f"❌ Bad content type `{ct}`."
+    if not magic_ok(data):
+        return "❌ Not a real image (header mismatch). Rejected."
+    return None
+
+def _image_ext(filename: str) -> str:
+    name = (filename or "").lower()
+    for e in (".webp", ".gif", ".jpeg", ".jpg", ".png"):
+        if name.endswith(e):
+            return "jpg" if e == ".jpeg" else e[1:]
+    return "png"
+
+async def _patch_guild_profile(guild: discord.Guild, **fields):
+    payload = {}
+    for key in ("nick", "bio"):
+        if key in fields:
+            payload[key] = fields[key]
+    for key in ("avatar", "banner"):
+        if key not in fields:
+            continue
+        data = fields[key]
+        if data is None:
+            payload[key] = None
+        else:
+            raw, ext = data
+            mime = {
+                "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                "gif": "image/gif", "webp": "image/webp",
+            }.get(ext, "image/png")
+            payload[key] = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+    if not payload:
+        return
+    route = discord.http.Route(
+        "PATCH", "/guilds/{guild_id}/members/@me", guild_id=guild.id
+    )
+    await bot.http.request(route, json=payload)
 
 async def check_streak_roles(member: discord.Member, streak_count: int):
     """達成連擊天數時發放對應身分組"""
@@ -1052,8 +1156,8 @@ async def sync_automod_rules(guild: discord.Guild) -> str | None:
         groups.setdefault(dur, []).append(word)
 
     if len(groups) > MAX_AUTOMOD_KEYWORD_RULES:
-        return (f"❌ 目前有 **{len(groups)}** 種不同的禁言時長，但 Discord AutoMod 每個伺服器最多只能有 "
-                f"{MAX_AUTOMOD_KEYWORD_RULES} 條關鍵字規則。請把部分違規字詞改成相同時長，或減少種類。")
+        return (f"❌ There are currently **{len(groups)}** different ban durations, but each Discord AutoMod server can only have a maximum of "
+                f"{MAX_AUTOMOD_KEYWORD_RULES} keyword rules. Please change some of the violating words to the same duration, or reduce the number of categories.")
 
     try:
         existing_rules = await guild.fetch_automod_rules()
@@ -1373,7 +1477,7 @@ class WelcomeConfigView(ui.View):
 
     @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=0)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
-        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message")
+        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message\nCustomize profile")
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=SettingsView(interaction.guild_id))
 
@@ -1516,7 +1620,7 @@ class LevelSettingsView(ui.View):
 
     @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=0)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
-        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message")
+        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message\nCustomize profile")
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=SettingsView(interaction.guild_id))
 
@@ -1633,7 +1737,14 @@ class AutoMuteModal(ui.Modal, title="Add Banned Word"):
 
 
 class BannedWordDeleteSelect(ui.Select):
-    def __init__(self): super().__init__(placeholder="🗑️ Select a word to CANCEL / REMOVE rule", min_values=1, max_values=1, options=[discord.SelectOption(label="Placeholder", value="none")], row=1)
+    def __init__(self):
+        super().__init__(
+            placeholder="🗑️ Select a word to CANCEL / REMOVE rule",
+            min_values=1,
+            max_values=1,
+            options=[discord.SelectOption(label="Placeholder", value="none")],
+            row=2,  # ← 不要和 Delete Message 按鈕同一列
+        )
     async def callback(self, interaction: discord.Interaction):
         if self.values[0] == "none": return await interaction.response.defer()
         word = self.values[0]
@@ -1699,7 +1810,7 @@ class AutoMuteConfigView(ui.View):
 
     @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=0)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
-        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message")
+        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message\nCustomize profile")
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=SettingsView(interaction.guild_id))
 
@@ -1907,7 +2018,7 @@ class TimeMessageConfigView(ui.View):
         embed = discord.Embed(
             title="Settings",
             color=0xdfe600,
-            description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message",
+            description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message\nCustomize profile",
         )
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(
@@ -1931,6 +2042,94 @@ class TimeMessageConfigView(ui.View):
                 ephemeral=True,
             )
         await interaction.response.send_modal(AnnouncementModal(self))
+
+class AIConfigView(ui.View):
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+
+        ai_on = is_ai_enabled(guild_id)
+        self.toggle_ai.label = "✅ 67+AI: On" if ai_on else "❌ 67+AI: Off"
+        self.toggle_ai.style = (
+            discord.ButtonStyle.success if ai_on else discord.ButtonStyle.danger
+        )
+
+        only_sel, _ = get_ai_channel_mode(guild_id)
+        self.toggle_only.label = (
+            "✅ Only selected channel: On" if only_sel else "❌ Only selected channel: Off"
+        )
+        self.toggle_only.style = (
+            discord.ButtonStyle.success if only_sel else discord.ButtonStyle.secondary
+        )
+
+        if only_sel:
+            ch_select = ui.ChannelSelect(
+                placeholder="📢 Select AI-only channel",
+                channel_types=[discord.ChannelType.text],
+                row=2,
+                min_values=1,
+                max_values=1,
+            )
+            ch_select.callback = self.on_channel_select
+            self.add_item(ch_select)
+        else:
+            self.remove_item(self.pick_channel_hint)  # 若你沒有這個按鈕可刪此行
+
+    def build_embed(self, guild: discord.Guild) -> discord.Embed:
+        ai_on = is_ai_enabled(self.guild_id)
+        only_sel, cid = get_ai_channel_mode(self.guild_id)
+        ch_text = f"<#{cid}>" if cid else "Not set"
+        embed = discord.Embed(title="🤖 67+AI Settings", color=0x5865F2 if ai_on else 0x2b2d31)
+        embed.description = (
+            f"**67+AI:** {'**on**' if ai_on else '**off**'}\n"
+            f"• On = anyone can @ me\n"
+            f"• Off = only members with **Manage Channel** in that channel can @ me\n\n"
+            f"**Only on selected channel:** {'**on**' if only_sel else '**off**'}\n"
+            f"• Channel: {ch_text}\n"
+            f"• When On + channel set: AI **only** works there, **no @ needed**\n"
+        )
+        embed.set_footer(text=f"{guild.name}｜67")
+        return embed
+
+    async def on_channel_select(self, interaction: discord.Interaction):
+        raw = (interaction.data or {}).get("values") or []
+        if not raw:
+            return await interaction.response.send_message("❌ No channel.", ephemeral=True)
+        set_ai_channel(interaction.guild_id, str(raw[0]))
+        view = AIConfigView(interaction.guild_id)
+        await interaction.response.edit_message(
+            embed=view.build_embed(interaction.guild), view=view
+        )
+
+    @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=0)
+    async def back(self, interaction: discord.Interaction, button: ui.Button):
+        embed = discord.Embed(
+            title="Settings",
+            color=0xdfe600,
+            description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message\n67+profile\n67+AI",
+        )
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
+        await interaction.response.edit_message(
+            embed=embed, view=SettingsView(interaction.guild_id)
+        )
+
+    @ui.button(label="✅ 67+AI: On", style=discord.ButtonStyle.success, row=0)
+    async def toggle_ai(self, interaction: discord.Interaction, button: ui.Button):
+        cur = is_ai_enabled(self.guild_id)
+        set_feature_enabled(self.guild_id, "ai67", not cur)
+        view = AIConfigView(interaction.guild_id)
+        await interaction.response.edit_message(
+            embed=view.build_embed(interaction.guild), view=view
+        )
+
+    @ui.button(label="❌ Only selected channel: Off", style=discord.ButtonStyle.secondary, row=1)
+    async def toggle_only(self, interaction: discord.Interaction, button: ui.Button):
+        only_sel, _ = get_ai_channel_mode(self.guild_id)
+        set_ai_only_selected(self.guild_id, not only_sel)
+        view = AIConfigView(interaction.guild_id)
+        await interaction.response.edit_message(
+            embed=view.build_embed(interaction.guild), view=view
+        )
 
 class WarnModal(ui.Modal, title="Send a Warning"):
     reason = ui.TextInput(label="Warning message", style=discord.TextStyle.long, required=True, max_length=1000)
@@ -2125,7 +2324,7 @@ class StreaksMainView(ui.View):
 
     @ui.button(label="🔙 Back", style=discord.ButtonStyle.gray, row=0)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
-        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message")
+        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message\nCustomize profile")
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=SettingsView(interaction.guild_id))
 
@@ -2224,7 +2423,7 @@ class CountingConfigView(ui.View):
 
     @ui.button(label="🔙 Back", style=discord.ButtonStyle.gray, row=0)
     async def back(self, interaction: discord.Interaction, button: ui.Button):
-        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message")
+        embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message\nCustomize profile")
         embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.edit_message(embed=embed, view=SettingsView(interaction.guild_id))
 
@@ -2260,6 +2459,146 @@ class CountingConfigView(ui.View):
         new_view = CountingConfigView(interaction.guild_id)
         await interaction.response.edit_message(embed=new_view.build_embed(interaction.guild), view=new_view)
 
+class ProfileEditModal(ui.Modal, title="67+profile"):
+    name_field = ui.Label(
+        text="Nickname",
+        description="The nickname of me.",
+        component=ui.TextInput(
+            style=discord.TextStyle.short,
+            placeholder="Nickname",
+            max_length=32,
+            required=False,
+        ),
+    )
+    bio_field = ui.Label(
+        text="Bio",
+        description="Optional.",
+        component=ui.TextInput(
+            style=discord.TextStyle.paragraph,
+            placeholder="Bio",
+            max_length=190,
+            required=False,
+        ),
+    )
+    avatar_field = ui.Label(
+        text="Update Avatar",
+        description="Optional, only image file accepted.",
+        component=ui.FileUpload(max_values=1, min_values=0, required=False),
+    )
+    banner_field = ui.Label(
+        text="Upload Banner",
+        description="Optional, only image file accepted.",
+        component=ui.FileUpload(max_values=1, min_values=0, required=False),
+    )
+
+    def __init__(self, guild_id: int):
+        super().__init__()
+        self.guild_id = guild_id
+        prev_nick, prev_bio = get_guild_bot_profile(guild_id)
+        self.name_field.component.default = prev_nick or ""
+        self.bio_field.component.default = prev_bio or ""
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not is_paid_guild(interaction.guild_id, "67profile"):
+            return await interaction.response.send_message(
+                "Seems u haven't buy 67+profile", ephemeral=True
+            )
+        await interaction.response.defer(ephemeral=True)
+
+        nick = (self.name_field.component.value or "").strip() or None
+        bio = (self.bio_field.component.value or "").strip() or None
+        try:
+            me = interaction.guild.me
+            if me is not None:
+                try:
+                    await me.edit(nick=nick)
+                except discord.Forbidden:
+                    pass
+            await _patch_guild_profile(interaction.guild, nick=nick, bio=bio)
+            save_guild_bot_profile(interaction.guild_id, nick, bio)
+        except Exception as e:
+            return await interaction.followup.send(f"❌ Name/Bio: {e}", ephemeral=True)
+
+        for field_name, label_comp in (
+            ("avatar", self.avatar_field),
+            ("banner", self.banner_field),
+        ):
+            files = getattr(label_comp.component, "values", None) or []
+            if not files:
+                continue
+            att = files[0]
+            try:
+                data = await att.read()
+            except Exception:
+                await interaction.followup.send(f"❌ Cannot read {field_name}.", ephemeral=True)
+                continue
+            err = _validate_profile_image(data, att.filename or "", att.content_type)
+            if err:
+                await interaction.followup.send(f"❌ {field_name}: {err}", ephemeral=True)
+                continue
+            try:
+                await _patch_guild_profile(
+                    interaction.guild,
+                    **{field_name: (data, _image_ext(att.filename or "x.png"))},
+                )
+            except Exception as e:
+                await interaction.followup.send(f"❌ {field_name}: {e}", ephemeral=True)
+
+        await interaction.followup.send("✅ Profile updated.", ephemeral=True)
+
+
+class ProfileSettingsView(ui.View):
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+
+    def build_embed(self, guild: discord.Guild) -> discord.Embed:
+        unlocked = is_paid_guild(guild.id, "67profile")
+        embed = discord.Embed(
+            title="👮‍♀️ Customize Profile",
+            color=0x5865F2 if unlocked else 0x2b2d31,
+        )
+        if not unlocked:
+            embed.description = (
+                "Status: **locked**\n"
+                "Owner: `/addpaidserver guild_id:... feature:67profile`"
+            )
+        else:
+            nick, bio = get_guild_bot_profile(guild.id)
+            me = guild.me
+            shown = nick or (me.display_name if me else "—")
+            embed.description = (
+                f"Status: **unlocked**\n\n"
+                f"**Nickname:** {shown}\n"
+                f"**Bio:** {bio or '???????'}\n\n"
+                f"Press **✏️ Edit** to customize the bot profile."
+            )
+        embed.set_footer(text=f"{guild.name}｜67")
+        return embed
+
+    @ui.button(label="🔙 Back", style=discord.ButtonStyle.secondary, row=0)
+    async def back(self, interaction: discord.Interaction, button: ui.Button):
+        embed = discord.Embed(
+            title="Settings",
+            color=0xdfe600,
+            description=(
+                "Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\n"
+                "Auto Mute\nTime Message\nCustomize profile"
+            ),
+        )
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
+        await interaction.response.edit_message(
+            embed=embed, view=SettingsView(interaction.guild_id)
+        )
+
+    @ui.button(label="✏️ Edit", style=discord.ButtonStyle.primary, row=0)
+    async def edit(self, interaction: discord.Interaction, button: ui.Button):
+        if not is_paid_guild(interaction.guild_id, "67profile"):
+            return await interaction.response.send_message(
+                "Seems u haven't buy 67+profile", ephemeral=True
+            )
+        await interaction.response.send_modal(ProfileEditModal(interaction.guild_id))
+
 class SettingsView(ui.View):
     def __init__(self, guild_id: int = None):
         super().__init__(timeout=None)
@@ -2289,9 +2628,16 @@ class SettingsView(ui.View):
         
     @ui.button(label="Auto Mute", style=discord.ButtonStyle.secondary, emoji="🔒")
     async def btn_a(self, interaction: discord.Interaction, btn: ui.Button):
-        view = AutoMuteConfigView(interaction.guild_id)
-        embed = view.build_embed(interaction.guild)
-        await interaction.response.edit_message(embed=embed, view=view)
+        try:
+            view = AutoMuteConfigView(interaction.guild_id)
+            embed = view.build_embed(interaction.guild)
+            await interaction.response.edit_message(embed=embed, view=view)
+        except Exception as e:
+            logger.error(f"[AutoMute open error]: {e}")
+            if interaction.response.is_done():
+                await interaction.followup.send(f"❌ {e}", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"❌ {e}", ephemeral=True)
         
     @ui.button(label="Time Message", style=discord.ButtonStyle.secondary, emoji="⏰")
     async def btn_t(self, interaction: discord.Interaction, btn: ui.Button):
@@ -2304,7 +2650,21 @@ class SettingsView(ui.View):
         view = CountingConfigView(interaction.guild_id)
         embed = view.build_embed(interaction.guild)
         await interaction.response.edit_message(embed=embed, view=view)
+        
+    @ui.button(label="Customize profile", style=discord.ButtonStyle.secondary, emoji="👮‍♀️", row=2)
+    async def btn_profile(self, interaction: discord.Interaction, btn: ui.Button):
+        view = ProfileSettingsView(interaction.guild_id)
+        await interaction.response.edit_message(
+            embed=view.build_embed(interaction.guild), view=view
+        )
 
+    @ui.button(label="67+AI", style=discord.ButtonStyle.secondary, emoji="🤖", row=2)
+    async def btn_ai(self, interaction: discord.Interaction, btn: ui.Button):
+        view = AIConfigView(interaction.guild_id)
+        await interaction.response.edit_message(
+            embed=view.build_embed(interaction.guild), view=view
+        )
+    
     @ui.button(label="✅ Auto Reply: On", style=discord.ButtonStyle.success, emoji="🔁")
     async def btn_autoreply(self, interaction: discord.Interaction, btn: ui.Button):
         currently_on = is_autoreply_enabled(interaction.guild_id)
@@ -2312,7 +2672,7 @@ class SettingsView(ui.View):
         if currently_on:
             # 🎯 要關閉之前，先檢查這個伺服器有沒有在付費白名單裡
             if not is_paid_guild(interaction.guild_id, "67silent"):
-                return await interaction.response.send_message("Seems u haven't buy 67+Slient", ephemeral=True)
+                return await interaction.response.send_message("Seems u haven't buy 67+Silent", ephemeral=True)
             set_feature_enabled(interaction.guild_id, "autoreply67", False)
         else:
             set_feature_enabled(interaction.guild_id, "autoreply67", True)
@@ -2321,6 +2681,57 @@ class SettingsView(ui.View):
         btn.label = "✅ Auto Reply: On" if new_state else "❌ Auto Reply: Off"
         btn.style = discord.ButtonStyle.success if new_state else discord.ButtonStyle.secondary
         await interaction.response.edit_message(view=self)
+
+    def is_ai_enabled(guild_id) -> bool:
+        """67+AI 總開關，預設開啟。"""
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT enabled FROM feature_toggles WHERE guild_id = ? AND feature = ?",
+            (str(guild_id), "ai67"),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return (row[0] == 1) if row else True  # 預設 On
+    
+    
+    def get_ai_channel_mode(guild_id) -> tuple[bool, str | None]:
+        """回傳 (only_selected, channel_id)。"""
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT only_selected, channel_id FROM ai_settings WHERE guild_id = ?",
+            (str(guild_id),),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return False, None
+        return bool(row[0]), row[1]
+    
+    
+    def set_ai_only_selected(guild_id, enabled: bool):
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO ai_settings (guild_id, only_selected) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET only_selected = excluded.only_selected",
+            (str(guild_id), 1 if enabled else 0),
+        )
+        conn.commit()
+        conn.close()
+    
+    
+    def set_ai_channel(guild_id, channel_id: str | None):
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO ai_settings (guild_id, channel_id) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET channel_id = excluded.channel_id",
+            (str(guild_id), channel_id),
+        )
+        conn.commit()
+        conn.close()
 
 # =================================================================
 # 🚀 6. SLASH COMMANDS
@@ -2337,7 +2748,7 @@ async def help_cmd(interaction: discord.Interaction):
 @bot.tree.command(name="settings", description="Open bot configuration hub")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def settings(interaction: discord.Interaction):
-    embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message")
+    embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message\nCustomize profile")
     embed.set_footer(text=f"{interaction.guild.name}｜67")
     await interaction.response.send_message(embed=embed, view=SettingsView(interaction.guild_id))
 
@@ -4030,7 +4441,62 @@ async def on_message(message: discord.Message):
 
     # 🎯 標記監聽器（Groq API 完美非同步版，支援單純標記與回覆標記）
     # 這段刻意放在「伺服器限定」判斷之前，讓私訊（個人安裝情境）也能 @ 機器人問問題
-    if bot.user.mentioned_in(message) and not message.mention_everyone:
+        # ----- 67+AI 觸發條件 -----
+trigger_ai = False
+    require_mention = True
+
+    if message.guild is None:
+        # 私訊：一定收得到訊息；不需 @（回覆預設也不會 mention）
+        trigger_ai = True
+        require_mention = False
+    else:
+        gid = message.guild.id
+        only_sel, ai_cid = get_ai_channel_mode(gid)
+
+        if only_sel and ai_cid:
+            if str(message.channel.id) == str(ai_cid):
+                trigger_ai = True
+                require_mention = False
+            else:
+                trigger_ai = False
+        else:
+            trigger_ai = bot.user.mentioned_in(message) and not message.mention_everyone
+            require_mention = True
+
+        if trigger_ai and not is_ai_enabled(gid):
+            if not isinstance(message.author, discord.Member):
+                trigger_ai = False
+            else:
+                perms = message.channel.permissions_for(message.author)
+                if not perms.manage_channels:
+                    trigger_ai = False
+
+    if trigger_ai:
+        if require_mention:
+            clean_content = (
+                message.content
+                .replace(f"<@{bot.user.id}>", "")
+                .replace(f"<@!{bot.user.id}>", "")
+                .strip()
+            )
+        else:
+            # 私訊 / 免 @ 頻道：整段內容；若有人仍 @ 了就拔掉 mention
+            clean_content = (
+                (message.content or "")
+                .replace(f"<@{bot.user.id}>", "")
+                .replace(f"<@!{bot.user.id}>", "")
+                .strip()
+            )
+        else:
+            # 免 @ 模式：整句當問題；略過空訊息、純指令可選
+            clean_content = (message.content or "").strip()
+            if not clean_content and not message.attachments:
+                return
+            # 可選：略過 slash 顯示用的空內容、或太短
+            if clean_content.startswith("//"):  # 自訂忽略前綴可再調
+                return
+
+        # 下面接你原本的 image_url / 字數 / cooldown / AI 呼叫...
         # 🧹 拔除訊息中的機器人標籤與前後空格
         clean_content = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
 
