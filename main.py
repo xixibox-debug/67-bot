@@ -827,6 +827,30 @@ init_db()
 
 # ===== Plane Order UI =====
 
+def plane_order_upsert(thread_id: int, guild_id: int, **fields):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    tid, gid = str(thread_id), str(guild_id)
+    cursor.execute("SELECT thread_id FROM plane_orders WHERE thread_id = ?", (tid,))
+    if not cursor.fetchone():
+        cursor.execute(
+            "INSERT INTO plane_orders (thread_id, guild_id, status, created_at) VALUES (?, ?, ?, ?)",
+            (
+                tid,
+                gid,
+                fields.get("status", "open"),
+                datetime.datetime.utcnow().isoformat(),
+            ),
+        )
+    if fields:
+        cols = ", ".join(f"{k} = ?" for k in fields)
+        cursor.execute(
+            f"UPDATE plane_orders SET {cols} WHERE thread_id = ?",
+            (*[fields[k] for k in fields], tid),
+        )
+    conn.commit()
+    conn.close()
+
 def _plane_is_reviewer(user_id: int) -> bool:
     return user_id in (USER_RC_REVIEW_1, USER_RC_REVIEW_2)
 
@@ -2887,21 +2911,33 @@ class AutoReactionLayoutView(ui.LayoutView):
 
     async def _edit_remove(self, interaction: discord.Interaction):
         rows = list_auto_reactions(self.guild_id)
+        guild_id = self.guild_id
+
+        pick = AutoReactionPickSelect(guild_id, rows)
+
+        back_btn = ui.Button(
+            label="⬅️ Back",
+            style=discord.ButtonStyle.secondary,
+        )
+
+        async def _back(inter: discord.Interaction):
+            await inter.response.edit_message(
+                view=AutoReactionLayoutView(guild_id)
+            )
+
+        back_btn.callback = _back
+
         view = ui.LayoutView(timeout=120)
-        pick = AutoReactionPickSelect(self.guild_id, rows)
-        # 若 Select 必須放在 Container/ActionRow：
         view.add_item(
             ui.Container(
                 ui.TextDisplay("**Select a rule to remove**"),
                 ui.ActionRow(pick),
-                ui.ActionRow(
-                    ui.Button(label="⬅️ Back", style=discord.ButtonStyle.secondary)
-                ),
+                ui.ActionRow(back_btn),
                 accent_color=0x727EFF,
             )
         )
-        # Back on that page: re-show AutoReactionLayoutView — 幫 Back 綁 callback
         await interaction.response.edit_message(view=view)
+
 
 class WarnModal(ui.Modal, title="Send a Warning"):
     reason = ui.TextInput(label="Warning message", style=discord.TextStyle.long, required=True, max_length=1000)
@@ -4983,7 +5019,25 @@ async def on_ready():
         except: pass
 
     if not plane_rc_delivery_reminders.is_running():
-    plane_rc_delivery_reminders.start()
+        plane_rc_delivery_reminders.start()
+
+        # Restore PlaneOrderView for open orders (buttons work after restart)
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT thread_id, prev_status FROM plane_orders "
+                "WHERE status IS NULL OR status NOT IN ('completed')"
+            )
+            for thread_id, layout in cursor.fetchall():
+                lay = layout if layout in ("full", "b", "c") else "full"
+                try:
+                    bot.add_view(PlaneOrderView(int(thread_id), layout=lay))
+                except Exception as e:
+                    logger.warning(f"[plane add_view] {thread_id}: {e}")
+            conn.close()
+        except Exception as e:
+            logger.error(f"[plane restore views]: {e}")
     
     # 🎯 幫還沒有 Webhook 紀錄的既有伺服器（bot 加入時這個功能還不存在）補跑一次
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
@@ -5263,13 +5317,7 @@ async def on_thread_create(thread: discord.Thread):
         return
     if thread.parent_id != PLANE_FORUM_ID:
         return
-    # 只處理論壇貼文
     await handle_plane_forum_post(thread)
-    view = PlaneOrderView(thread.id, layout="full")  # or "b" / "c"
-    msg = await thread.send(content=text, view=view)
-    plane_order_upsert(thread.id, thread.guild.id, message_id=str(msg.id), status="open")
-    # 重啟後按鈕仍可用：
-    bot.add_view(PlaneOrderView(thread.id, layout="full"))  # 較好在 on_ready 從 DB 批次 add_view
 
 async def handle_plane_prefix(message: discord.Message, rest: str):
     thread = message.channel
