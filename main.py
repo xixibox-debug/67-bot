@@ -2909,7 +2909,7 @@ class AutoReactionLayoutView(ui.LayoutView):
     async def _add(self, interaction: discord.Interaction):
         await interaction.response.send_modal(AutoReactionAddModal(self.guild_id))
 
-        async def _edit_remove(self, interaction: discord.Interaction):
+    async def _edit_remove(self, interaction: discord.Interaction):
         rows = list_auto_reactions(self.guild_id)
         guild_id = self.guild_id
 
