@@ -2909,7 +2909,7 @@ class AutoReactionLayoutView(ui.LayoutView):
     async def _add(self, interaction: discord.Interaction):
         await interaction.response.send_modal(AutoReactionAddModal(self.guild_id))
 
-    async def _edit_remove(self, interaction: discord.Interaction):
+        async def _edit_remove(self, interaction: discord.Interaction):
         rows = list_auto_reactions(self.guild_id)
         guild_id = self.guild_id
 
@@ -5021,23 +5021,23 @@ async def on_ready():
     if not plane_rc_delivery_reminders.is_running():
         plane_rc_delivery_reminders.start()
 
-        # Restore PlaneOrderView for open orders (buttons work after restart)
-        try:
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT thread_id, prev_status FROM plane_orders "
-                "WHERE status IS NULL OR status NOT IN ('completed')"
-            )
-            for thread_id, layout in cursor.fetchall():
-                lay = layout if layout in ("full", "b", "c") else "full"
-                try:
-                    bot.add_view(PlaneOrderView(int(thread_id), layout=lay))
-                except Exception as e:
-                    logger.warning(f"[plane add_view] {thread_id}: {e}")
-            conn.close()
-        except Exception as e:
-            logger.error(f"[plane restore views]: {e}")
+    # Restore PlaneOrderView for open orders (buttons work after restart)
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT thread_id, prev_status FROM plane_orders "
+            "WHERE status IS NULL OR status NOT IN ('completed')"
+        )
+        for thread_id, layout in cursor.fetchall():
+            lay = layout if layout in ("full", "b", "c") else "full"
+            try:
+                bot.add_view(PlaneOrderView(int(thread_id), layout=lay))
+            except Exception as e:
+                logger.warning(f"[plane add_view] {thread_id}: {e}")
+        conn.close()
+    except Exception as e:
+        logger.error(f"[plane restore views]: {e}")
     
     # 🎯 幫還沒有 Webhook 紀錄的既有伺服器（bot 加入時這個功能還不存在）補跑一次
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
@@ -5310,6 +5310,89 @@ async def tavily_search(query: str) -> str:
     except Exception as e:
         logger.error(f"[Tavily 執行錯誤]: {e}")
         return "搜尋時發生錯誤。"
+
+async def handle_plane_forum_post(thread: discord.Thread):
+    """Validate tags, post order message + buttons, or error and delete."""
+    await asyncio.sleep(1.5)  # wait for applied_tags to settle
+
+    try:
+        thread = await thread.guild.fetch_channel(thread.id)
+    except discord.HTTPException:
+        pass
+
+    tag_ids = {t.id for t in (getattr(thread, "applied_tags", None) or [])}
+    purpose_ids = {TAG_MAIN_A, TAG_MAIN_B, TAG_MAIN_C}
+    purpose = tag_ids & purpose_ids
+    locations = tag_ids & PLANE_LOCATION_TAGS
+
+    # exactly 1 purpose tag, at least 1 location tag
+    if len(purpose) != 1 or len(locations) < 1:
+        try:
+            await thread.send(
+                "❌ Invalid tags: need **exactly one** purpose tag "
+                "and **at least one** location tag.\n"
+                "This post will be deleted in 10 seconds."
+            )
+        except discord.HTTPException:
+            pass
+        await asyncio.sleep(10)
+        try:
+            await thread.delete(reason="Invalid plane order tags")
+        except discord.HTTPException:
+            pass
+        return
+
+    purpose_tag = next(iter(purpose))
+    layout = "full"
+    text = ""
+
+    if purpose_tag == TAG_MAIN_A:
+        layout = "full"
+        if locations & {TAG_LOC_SELL_1, TAG_LOC_SELL_2}:
+            role_ping = f"<@&{ROLE_SELL_A}>"
+        else:
+            role_ping = f"<@&{ROLE_SELL_B}>"
+        text = (
+            f"Pls check the latest delivery time at {DELIVERY_INFO_LINK} first.\n"
+            f"{role_ping}, time to sell planes.\n"
+            f"- If you are willing to assist with sales/reselling, please press `Take Over`.\n"
+            f"- If the order is completed, please press `Completed`."
+        )
+    elif purpose_tag == TAG_MAIN_B:
+        layout = "b"
+        text = (
+            f"<@&{ROLE_HELP_B}>, do you guys want to help?\n"
+            f"- If you are willing to assist with sales/reselling, please press `Take Over`.\n"
+            f"- If the order is completed, please press `Completed`."
+        )
+    elif purpose_tag == TAG_MAIN_C:
+        layout = "c"
+        text = (
+            f"<@{USER_PING_C}>，有人要賣飛機啦\n"
+            f"- If you are willing to assist with sales/reselling, please press `Take Over`.\n"
+            f"- If the order is completed, please press `Completed`."
+        )
+    else:
+        return
+
+    view = PlaneOrderView(thread.id, layout=layout)
+    try:
+        msg = await thread.send(content=text, view=view)
+    except discord.HTTPException as e:
+        logger.error(f"[plane order send failed]: {e}")
+        return
+
+    plane_order_upsert(
+        thread.id,
+        thread.guild.id,
+        message_id=str(msg.id),
+        status="open",
+        prev_status=layout,  # stash layout for add_view after restart
+    )
+    try:
+        bot.add_view(PlaneOrderView(thread.id, layout=layout))
+    except Exception as e:
+        logger.warning(f"[plane add_view on create]: {e}")
 
 @bot.event
 async def on_thread_create(thread: discord.Thread):
