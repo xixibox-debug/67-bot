@@ -763,6 +763,15 @@ def init_db():
             channel_id TEXT
         )
     """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS auto_reactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id TEXT NOT NULL,
+        trigger_text TEXT NOT NULL,
+        emoji TEXT NOT NULL
+    )
+    """)
     conn.commit()
     conn.close()
 
@@ -836,6 +845,49 @@ def is_paid_guild(guild_id, feature: str) -> bool:
     cursor.execute("SELECT 1 FROM paid_features WHERE guild_id = ? AND feature = ?", (str(guild_id), feature))
     row = cursor.fetchone(); conn.close()
     return row is not None
+
+def list_auto_reactions(guild_id) -> list[tuple[int, str, str]]:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, trigger_text, emoji FROM auto_reactions WHERE guild_id = ? ORDER BY id",
+        (str(guild_id),),
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def add_auto_reaction(guild_id, trigger_text: str, emoji: str) -> None:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO auto_reactions (guild_id, trigger_text, emoji) VALUES (?, ?, ?)",
+        (str(guild_id), trigger_text.strip(), emoji.strip()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_auto_reaction(row_id: int) -> None:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM auto_reactions WHERE id = ?", (row_id,))
+    conn.commit()
+    conn.close()
+
+
+def parse_reaction_emoji(raw: str):
+    """Return str (unicode) or discord.PartialEmoji for custom."""
+    raw = (raw or "").strip()
+    m = re.match(r"<(a?):([a-zA-Z0-9_]+):(\d+)>$", raw)
+    if m:
+        animated, name, eid = m.groups()
+        return discord.PartialEmoji(name=name, id=int(eid), animated=bool(animated))
+    # unicode / short emoji string
+    if raw:
+        return raw
+    return None
 
 import base64
 
@@ -1859,7 +1911,6 @@ TIME_MESSAGE_TIMEZONES = [
 
 
 def _local_hhmm_to_utc(hhmm: str, offset_hours: int) -> str | None:
-    """Convert HH:MM in a given UTC offset to HH:MM in UTC."""
     try:
         parts = hhmm.strip().split(":")
         if len(parts) != 2:
@@ -1875,41 +1926,107 @@ def _local_hhmm_to_utc(hhmm: str, offset_hours: int) -> str | None:
 
 
 class AnnouncementModal(ui.Modal, title="Add Time Message"):
-    t_time = ui.TextInput(
-        label="Time (HH:MM)",
-        placeholder="08:00",
-        max_length=5,
-        required=True,
+    channel_field = ui.Label(
+        text="Channel",
+        component=ui.ChannelSelect(
+            channel_types=[discord.ChannelType.text],
+            min_values=1,
+            max_values=1,
+            required=True,
+        ),
     )
-    msg = ui.TextInput(
-        label="Message Content",
-        style=discord.TextStyle.paragraph,
-        required=True,
-        max_length=2000,
+    timezone_field = ui.Label(
+        text="Timezone",
+        component=ui.Select(
+            options=[
+                discord.SelectOption(label=label[:100], value=str(offset))
+                for label, offset in TIME_MESSAGE_TIMEZONES
+            ],
+            min_values=1,
+            max_values=1,
+            required=True,
+        ),
+    )
+    time_field = ui.Label(
+        text="Time (HH:MM)",
+        component=ui.TextInput(
+            placeholder="08:00",
+            max_length=5,
+            required=True,
+        ),
+    )
+    message_field = ui.Label(
+        text="Content",
+        component=ui.TextInput(
+            style=discord.TextStyle.paragraph,
+            max_length=2000,
+            required=True,
+        ),
     )
 
     def __init__(
         self,
         parent_view: "TimeMessageConfigView",
-        channel_id: int,
-        tz_offset: int,
-        tz_label: str,
+        *,
+        edit_id: int | None = None,
+        channel_id: int | None = None,
+        tz_offset: int = 0,
+        hhmm: str = "",
+        content: str = "",
     ):
         super().__init__()
         self.parent_view = parent_view
-        self.channel_id = channel_id
-        self.tz_offset = tz_offset
-        self.tz_label = tz_label
+        self.edit_id = edit_id
+
+        self.time_field.component.default = hhmm or ""
+        self.message_field.component.default = content or ""
+
+        for opt in self.timezone_field.component.options:
+            opt.default = opt.value == str(tz_offset)
+
+        if channel_id is not None:
+            try:
+                self.channel_field.component.default_values = [
+                    discord.SelectDefaultValue(
+                        id=channel_id,
+                        type=discord.SelectDefaultValueType.channel,
+                    )
+                ]
+            except Exception:
+                pass
+
+        if edit_id is not None:
+            self.title = "Edit Time Message"
 
     async def on_submit(self, interaction: discord.Interaction):
-        raw = (self.t_time.value or "").strip()
-        utc_time = _local_hhmm_to_utc(raw, self.tz_offset)
+        ch_values = getattr(self.channel_field.component, "values", None) or []
+        if not ch_values:
+            return await interaction.response.send_message(
+                "❌ Please select a channel.", ephemeral=True
+            )
+        channel = ch_values[0]
+        channel_id = channel.id if hasattr(channel, "id") else int(channel)
+
+        tz_values = getattr(self.timezone_field.component, "values", None) or []
+        if not tz_values:
+            return await interaction.response.send_message(
+                "❌ Please select a timezone.", ephemeral=True
+            )
+        offset = int(tz_values[0])
+        tz_label = next(
+            (lb for lb, off in TIME_MESSAGE_TIMEZONES if off == offset),
+            f"UTC{offset:+d}",
+        )
+
+        raw_time = (self.time_field.component.value or "").strip()
+        utc_time = _local_hhmm_to_utc(raw_time, offset)
         if not utc_time:
             return await interaction.response.send_message(
                 "❌ Invalid time. Use HH:MM (00:00–23:59).",
                 ephemeral=True,
             )
-        text = (self.msg.value or "").strip()
+
+        text = (self.message_field.component.value or "").strip()
         if not text:
             return await interaction.response.send_message(
                 "❌ Message cannot be empty.",
@@ -1918,10 +2035,22 @@ class AnnouncementModal(ui.Modal, title="Add Time Message"):
 
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO announcements (time, message, channel_id) VALUES (?, ?, ?)",
-            (utc_time, text, str(self.channel_id)),
-        )
+        if self.edit_id is not None:
+            cursor.execute(
+                "UPDATE announcements SET time = ?, message = ?, channel_id = ? WHERE id = ?",
+                (utc_time, text, str(channel_id), self.edit_id),
+            )
+            done_msg = (
+                f"✏️ Updated **{raw_time}** ({tz_label}) = **{utc_time} UTC** → <#{channel_id}>"
+            )
+        else:
+            cursor.execute(
+                "INSERT INTO announcements (time, message, channel_id) VALUES (?, ?, ?)",
+                (utc_time, text, str(channel_id)),
+            )
+            done_msg = (
+                f"⏰ Scheduled **{raw_time}** ({tz_label}) = **{utc_time} UTC** → <#{channel_id}>"
+            )
         conn.commit()
         conn.close()
 
@@ -1930,101 +2059,70 @@ class AnnouncementModal(ui.Modal, title="Add Time Message"):
             embed=main.build_embed(interaction.guild),
             view=main,
         )
-        await interaction.followup.send(
-            f"⏰ Scheduled **{raw}** ({self.tz_label}) = **{utc_time} UTC** → <#{self.channel_id}>",
-            ephemeral=True,
-        )
+        await interaction.followup.send(done_msg, ephemeral=True)
 
 
-class TimeMessageTimezoneSelect(ui.Select):
-    def __init__(self, parent_view: "TimeMessageConfigView", channel_id: int):
-        options = [
-            discord.SelectOption(label=label[:100], value=str(offset))
-            for label, offset in TIME_MESSAGE_TIMEZONES
-        ]
-        super().__init__(
-            placeholder="Select timezone…",
-            min_values=1,
-            max_values=1,
-            options=options,
-            row=0,
-        )
-        self.parent_view = parent_view
-        self.channel_id = channel_id
+class TimeMessageActionView(ui.View):
+    """After picking a schedule: Edit or Delete."""
 
-    async def callback(self, interaction: discord.Interaction):
-        offset = int(self.values[0])
-        label = next(
-            (lb for lb, off in TIME_MESSAGE_TIMEZONES if off == offset),
-            f"UTC{offset:+d}",
+    def __init__(self, parent: "TimeMessageConfigView", row_id: int):
+        super().__init__(timeout=120)
+        self.parent = parent
+        self.row_id = row_id
+
+    @ui.button(label="Edit", style=discord.ButtonStyle.primary, emoji="✏️", row=0)
+    async def edit(self, interaction: discord.Interaction, button: ui.Button):
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT time, message, channel_id FROM announcements WHERE id = ?",
+            (self.row_id,),
         )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return await interaction.response.send_message(
+                "❌ This schedule no longer exists.", ephemeral=True
+            )
+        t_time, msg, cid = row
         await interaction.response.send_modal(
-            AnnouncementModal(self.parent_view, self.channel_id, offset, label)
+            AnnouncementModal(
+                self.parent,
+                edit_id=self.row_id,
+                channel_id=int(cid),
+                tz_offset=0,  # stored as UTC; user can change timezone on edit
+                hhmm=t_time or "",
+                content=msg or "",
+            )
         )
 
+    @ui.button(label="Delete", style=discord.ButtonStyle.danger, emoji="🗑️", row=0)
+    async def delete(self, interaction: discord.Interaction, button: ui.Button):
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM announcements WHERE id = ?", (self.row_id,))
+        conn.commit()
+        conn.close()
+        main = TimeMessageConfigView(self.parent.guild_id)
+        await interaction.response.edit_message(
+            embed=main.build_embed(interaction.guild),
+            view=main,
+        )
+        await interaction.followup.send("✅ Schedule deleted.", ephemeral=True)
 
-class TimeMessageTimezoneView(ui.View):
-    def __init__(self, parent_view: "TimeMessageConfigView", channel_id: int):
-        super().__init__(timeout=180)
-        self.parent_view = parent_view
-        self.add_item(TimeMessageTimezoneSelect(parent_view, channel_id))
-
-    @ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=1)
+    @ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=0)
     async def cancel(self, interaction: discord.Interaction, button: ui.Button):
-        main = TimeMessageConfigView(self.parent_view.guild_id)
+        main = TimeMessageConfigView(self.parent.guild_id)
         await interaction.response.edit_message(
             embed=main.build_embed(interaction.guild),
             view=main,
         )
 
 
-class TimeMessageChannelSelect(ui.ChannelSelect):
-    def __init__(self, parent_view: "TimeMessageConfigView"):
-        super().__init__(
-            placeholder="Select channel for this Time Message",
-            channel_types=[discord.ChannelType.text],
-            min_values=1,
-            max_values=1,
-            row=0,
-        )
-        self.parent_view = parent_view
-
-    async def callback(self, interaction: discord.Interaction):
-        channel = self.values[0]
-        embed = discord.Embed(
-            title="Add Time Message — Step 2/3",
-            description=(
-                f"Channel: {channel.mention}\n\n"
-                f"Next: **select timezone**, then enter time and message."
-            ),
-            color=0x3498db,
-        )
-        embed.set_footer(text=f"{interaction.guild.name}｜67")
-        await interaction.response.edit_message(
-            embed=embed,
-            view=TimeMessageTimezoneView(self.parent_view, channel.id),
-        )
-
-
-class TimeMessageChannelView(ui.View):
-    def __init__(self, parent_view: "TimeMessageConfigView"):
-        super().__init__(timeout=180)
-        self.parent_view = parent_view
-        self.add_item(TimeMessageChannelSelect(parent_view))
-
-    @ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=1)
-    async def cancel(self, interaction: discord.Interaction, button: ui.Button):
-        main = TimeMessageConfigView(self.parent_view.guild_id)
-        await interaction.response.edit_message(
-            embed=main.build_embed(interaction.guild),
-            view=main,
-        )
-
-
-class TimeMessageDeleteSelect(ui.Select):
+class TimeMessagePickSelect(ui.Select):
     def __init__(self):
         super().__init__(
-            placeholder="Select a schedule to cancel",
+            placeholder="Select a schedule…",
             min_values=1,
             max_values=1,
             options=[discord.SelectOption(label="Placeholder", value="none")],
@@ -2034,20 +2132,16 @@ class TimeMessageDeleteSelect(ui.Select):
     async def callback(self, interaction: discord.Interaction):
         if self.values[0] == "none":
             return await interaction.response.defer()
-        rid = self.values[0]
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM announcements WHERE id = ?", (rid,))
-        conn.commit()
-        conn.close()
-        self.view.update_select_menu()
-        await interaction.response.edit_message(
-            embed=self.view.build_embed(interaction.guild),
-            view=self.view,
+        rid = int(self.values[0])
+        embed = discord.Embed(
+            title="Time Message",
+            description="**Edit** this schedule or **Delete** it.",
+            color=0x3498db,
         )
-        await interaction.followup.send(
-            "✅ This auto message has been cancelled.",
-            ephemeral=True,
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
+        await interaction.response.edit_message(
+            embed=embed,
+            view=TimeMessageActionView(self.view, rid),
         )
 
 
@@ -2063,7 +2157,7 @@ class TimeMessageConfigView(ui.View):
         )
 
         if enabled:
-            self.select_menu = TimeMessageDeleteSelect()
+            self.select_menu = TimeMessagePickSelect()
             self.add_item(self.select_menu)
             self.update_select_menu()
         else:
@@ -2119,7 +2213,8 @@ class TimeMessageConfigView(ui.View):
             embed.description = (
                 f"Status: **on**\n\n"
                 f"**Schedule (times stored as UTC):**\n```\n{sched_text}\n```\n"
-                f"Press **Add Time Message** → channel → timezone → time & message."
+                f"**Add** opens a form (channel + timezone + time + content).\n"
+                f"**Select** a schedule to Edit or Delete."
             )
         embed.set_footer(text=f"{guild.name}｜67")
         return embed
@@ -2131,7 +2226,7 @@ class TimeMessageConfigView(ui.View):
             color=0xdfe600,
             description=(
                 "Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\n"
-                "Auto Mute\nTime Message\nCustomize profile"
+                "Auto Mute\nTime Message\nCustomize profile\n67+AI\nAuto Reaction"
             ),
         )
         embed.set_footer(text=f"{interaction.guild.name}｜67")
@@ -2152,16 +2247,7 @@ class TimeMessageConfigView(ui.View):
 
     @ui.button(label="⏰ Add Time Message", style=discord.ButtonStyle.success, row=0)
     async def add_time(self, interaction: discord.Interaction, button: ui.Button):
-        embed = discord.Embed(
-            title="Add Time Message — Step 1/3",
-            description="Select the **channel** where the message will be posted.",
-            color=0x3498db,
-        )
-        embed.set_footer(text=f"{interaction.guild.name}｜67")
-        await interaction.response.edit_message(
-            embed=embed,
-            view=TimeMessageChannelView(self),
-        )
+        await interaction.response.send_modal(AnnouncementModal(self))
 class AIConfigView(ui.View):
     def __init__(self, guild_id: int):
         super().__init__(timeout=None)
@@ -2247,6 +2333,174 @@ class AIConfigView(ui.View):
         await interaction.response.edit_message(
             embed=view.build_embed(interaction.guild), view=view
         )
+
+class AutoReactionAddModal(ui.Modal, title="Add Auto Reaction"):
+    trigger = ui.TextInput(
+        label="Trigger text",
+        placeholder="Hey",
+        max_length=100,
+        required=True,
+    )
+    emoji = ui.TextInput(
+        label="Emoji",
+        placeholder="👋 or <:name:1234567890>",
+        max_length=80,
+        required=True,
+    )
+
+    def __init__(self, guild_id: int):
+        super().__init__()
+        self.guild_id = guild_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        trig = (self.trigger.value or "").strip()
+        em = (self.emoji.value or "").strip()
+        if not trig or not em:
+            return await interaction.response.send_message(
+                "❌ Trigger and emoji required.", ephemeral=True
+            )
+        if parse_reaction_emoji(em) is None:
+            return await interaction.response.send_message(
+                "❌ Invalid emoji. Use 🤔 or `<:name:id>`.", ephemeral=True
+            )
+        add_auto_reaction(self.guild_id, trig, em)
+        view = AutoReactionLayoutView(self.guild_id)
+        await interaction.response.edit_message(view=view)
+
+
+class AutoReactionPickSelect(ui.Select):
+    def __init__(self, guild_id: int, rows: list):
+        options = [
+            discord.SelectOption(
+                label=f"{t[:40]} → {e}"[:100],
+                value=str(rid),
+            )
+            for rid, t, e in rows[:25]
+        ] or [discord.SelectOption(label="No rules", value="none")]
+        super().__init__(
+            placeholder="Select a rule to remove…",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+        self.guild_id = guild_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "none":
+            return await interaction.response.defer()
+        delete_auto_reaction(int(self.values[0]))
+        await interaction.response.edit_message(
+            view=AutoReactionLayoutView(self.guild_id)
+        )
+
+
+class AutoReactionLayoutView(ui.LayoutView):
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+        enabled = is_feature_enabled(guild_id, "autoreact")
+        rows = list_auto_reactions(guild_id)
+
+        if rows:
+            lines = "\n".join(
+                f"{i}. {t} → {e}" for i, (_, t, e) in enumerate(rows, 1)
+            )
+            list_block = f"```\n{lines}\n```"
+        else:
+            list_block = "```\n(empty)\n```"
+
+        status_txt = "on" if enabled else "off"
+        body = (
+            f"**🤗 Auto Reaction**\n"
+            f"Status: `{status_txt}`\n"
+            f"List:\n{list_block}"
+        )
+
+        back_btn = ui.Button(
+            style=discord.ButtonStyle.secondary,
+            label="⬅️ Back",
+        )
+        back_btn.callback = self._back
+
+        status_btn = ui.Button(
+            style=discord.ButtonStyle.success if enabled else discord.ButtonStyle.danger,
+            label="✅ Status: On" if enabled else "❌ Status: Off",
+        )
+        status_btn.callback = self._toggle
+
+        add_btn = ui.Button(
+            style=discord.ButtonStyle.primary,
+            label="➕ Add",
+            disabled=not enabled,
+        )
+        add_btn.callback = self._add
+
+        edit_btn = ui.Button(
+            style=discord.ButtonStyle.danger,
+            label="✏️ Edit & Remove",
+            disabled=not enabled or not rows,
+        )
+        edit_btn.callback = self._edit_remove
+
+        children = [
+            ui.ActionRow(back_btn, status_btn),
+            ui.TextDisplay(body),
+            ui.ActionRow(add_btn, edit_btn),
+            ui.TextDisplay("-# 67"),  # footer；若有 guild 名可在 callback 裡重畫
+        ]
+
+        # Edit & Remove 時在同一則用 Select：另開一層 view 較單純，見 _edit_remove
+
+        self.add_item(
+            ui.Container(
+                *children,
+                accent_color=0x727EFF,
+            )
+        )
+
+    async def _back(self, interaction: discord.Interaction):
+        # 回到 Settings（你現有 SettingsView；若 Settings 也是 Container 就對應那套）
+        embed = discord.Embed(
+            title="Settings",
+            color=0xdfe600,
+            description=(
+                "Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\n"
+                "Auto Mute\nTime Message\nCustomize profile\n67+AI\nAuto Reaction"
+            ),
+        )
+        embed.set_footer(text=f"{interaction.guild.name}｜67")
+        await interaction.response.edit_message(
+            embed=embed, view=SettingsView(interaction.guild_id), content=None
+        )
+        # 若 Settings 已全面改 Container，改成 edit_message(view=SettingsLayoutView(...))
+
+    async def _toggle(self, interaction: discord.Interaction):
+        cur = is_feature_enabled(self.guild_id, "autoreact")
+        set_feature_enabled(self.guild_id, "autoreact", not cur)
+        await interaction.response.edit_message(
+            view=AutoReactionLayoutView(self.guild_id)
+        )
+
+    async def _add(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(AutoReactionAddModal(self.guild_id))
+
+    async def _edit_remove(self, interaction: discord.Interaction):
+        rows = list_auto_reactions(self.guild_id)
+        view = ui.LayoutView(timeout=120)
+        pick = AutoReactionPickSelect(self.guild_id, rows)
+        # 若 Select 必須放在 Container/ActionRow：
+        view.add_item(
+            ui.Container(
+                ui.TextDisplay("**Select a rule to remove**"),
+                ui.ActionRow(pick),
+                ui.ActionRow(
+                    ui.Button(label="⬅️ Back", style=discord.ButtonStyle.secondary)
+                ),
+                accent_color=0x727EFF,
+            )
+        )
+        # Back on that page: re-show AutoReactionLayoutView — 幫 Back 綁 callback
+        await interaction.response.edit_message(view=view)
 
 class WarnModal(ui.Modal, title="Send a Warning"):
     reason = ui.TextInput(label="Warning message", style=discord.TextStyle.long, required=True, max_length=1000)
@@ -2780,6 +3034,14 @@ class SettingsView(ui.View):
         view = AIConfigView(interaction.guild_id)
         await interaction.response.edit_message(
             embed=view.build_embed(interaction.guild), view=view
+        )
+
+    @ui.button(label="🤗 Auto Reaction", style=discord.ButtonStyle.secondary, row=2)
+    async def btn_autoreact(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.edit_message(
+            content=None,
+            embed=None,  # Container 模式可不使用 embed
+            view=AutoReactionLayoutView(interaction.guild_id),
         )
     
     @ui.button(label="✅ Auto Reply: On", style=discord.ButtonStyle.success, emoji="🔁")
@@ -4585,6 +4847,19 @@ async def on_message(message: discord.Message):
                 if not perms.manage_channels:
                     trigger_ai = False
 
+    if message.guild and is_feature_enabled(message.guild.id, "autoreact"):
+        content_lower = (message.content or "").lower()
+        if content_lower:
+            for _rid, trigger, emoji_raw in list_auto_reactions(message.guild.id):
+                if trigger.lower() in content_lower:
+                    em = parse_reaction_emoji(emoji_raw)
+                    if em is None:
+                        continue
+                    try:
+                        await message.add_reaction(em)
+                    except (discord.HTTPException, discord.Forbidden):
+                        pass
+    
     if trigger_ai:
         clean_content = (
             (message.content or "")
