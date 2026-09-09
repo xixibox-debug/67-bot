@@ -521,6 +521,39 @@ async def run_agent_completion(client, model: str, messages: list, guild, invoke
 
 ai_cooldowns = {}
 
+# =====================================================
+# ==================== OSLF ASC =======================
+# =====================================================
+PLANE_GUILD_ID = 1458114486442524904
+PLANE_FORUM_ID = 1496743164713766952
+
+TAG_MAIN_A = 1496744588751274057          # 主標籤 A → 兩種文案分支
+TAG_MAIN_B = 1496883628523917464          # 主標籤 B
+TAG_MAIN_C = 1496883730068013247          # 主標籤 C
+
+TAG_LOC_SELL_1 = 1541828559155363851      # 與 A 組合 → 第一種 @role
+TAG_LOC_SELL_2 = 1541980764802121758
+
+TAG_COMPLETED = 1497211349502263387
+
+# 地點標籤白名單（用於「必須剛好一個」驗證）
+PLANE_LOCATION_TAGS = {
+    1503349407175807116, 1503349452071764009, 1503380125176037426,
+    1532795473637937302, 1532795530969612478, 1532795690642837674,
+    1541828559155363851, 1541980764802121758, 1541980827456372846,
+    1542446601899868270, 1543862391924723713,
+}
+
+ROLE_SELL_A = 1547189642540089384         # A + 特定地點
+ROLE_SELL_B = 1505934626202452079         # A + 其他／無上述兩地點
+ROLE_HELP_B = 1513789778225659904         # 主標籤 B
+USER_PING_C = 936410788242001970          # 主標籤 C
+
+USER_RC_REVIEW_1 = 1137258253949079683    # 定期定額審核
+USER_RC_REVIEW_2 = 936410788242001970
+
+DELIVERY_INFO_LINK = "https://discord.com/channels/1458114486442524904/1542445353591111750"
+
 # 🎯 語音時數追蹤：(guild_id, user_id) -> 進入監聽頻道的時間戳
 voice_sessions = {}
 MAX_VOICE_WATCH = 20  # 全機器人同時間最多監聽 5 個語音頻道
@@ -772,10 +805,378 @@ def init_db():
         emoji TEXT NOT NULL
     )
     """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS plane_orders (
+            thread_id TEXT PRIMARY KEY,
+            guild_id TEXT,
+            message_id TEXT,
+            status TEXT,
+            taken_by TEXT,
+            prev_status TEXT,
+            prev_title TEXT,
+            rc_period TEXT,
+            created_at TEXT
+        )
+    """)
+    
     conn.commit()
     conn.close()
 
 init_db()
+
+# ===== Plane Order UI =====
+
+def _plane_is_reviewer(user_id: int) -> bool:
+    return user_id in (USER_RC_REVIEW_1, USER_RC_REVIEW_2)
+
+
+def _plane_has_assign_role(member: discord.Member) -> bool:
+    return any(r.id == ROLE_SELL_B for r in member.roles)
+
+
+async def _plane_edit_status_line(message: discord.Message, line: str):
+    """Append or refresh a trailing status line on the bot message."""
+    base = message.content or ""
+    # strip previous taken-over / status lines we added
+    lines = [
+        ln
+        for ln in base.split("\n")
+        if not ln.startswith("👉 Taken over by：")
+        and not ln.startswith("【Status: Completed】")
+    ]
+    lines.append(line)
+    await message.edit(content="\n".join(lines))
+
+
+class PlaneRCApproveView(ui.View):
+    """同意 / 不同意 for recurring transfer."""
+
+    def __init__(self, thread_id: int, period: str, order_message_id: int):
+        super().__init__(timeout=None)
+        self.thread_id = thread_id
+        self.period = period  # "weekly" | "monthly"
+        self.order_message_id = order_message_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not _plane_is_reviewer(interaction.user.id):
+            await interaction.response.send_message(
+                "❌ Only reviewers can approve this.", ephemeral=True
+            )
+            return False
+        return True
+
+    @ui.button(label="同意", style=discord.ButtonStyle.success)
+    async def approve(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.defer()
+        thread = interaction.guild.get_thread(self.thread_id)
+        if thread is None:
+            try:
+                thread = await interaction.guild.fetch_channel(self.thread_id)
+            except discord.HTTPException:
+                return await interaction.followup.send("❌ Thread not found.", ephemeral=True)
+
+        prefix = "[Weekly] " if self.period == "weekly" else "[Monthly] "
+        title = thread.name or ""
+        if not title.startswith("[Weekly] ") and not title.startswith("[Monthly] "):
+            new_title = (prefix + title)[:100]
+            try:
+                await thread.edit(name=new_title)
+            except discord.HTTPException as e:
+                return await interaction.followup.send(f"❌ Cannot edit title: {e}", ephemeral=True)
+
+        plane_order_upsert(
+            self.thread_id,
+            interaction.guild.id,
+            status=f"rc_{self.period}",
+            rc_period=self.period,
+            prev_title=title,
+        )
+
+        for child in self.children:
+            child.disabled = True
+        await interaction.message.edit(view=self)
+        await interaction.followup.send(
+            f"✅ Recurring **{self.period}** approved. Title updated.",
+            ephemeral=True,
+        )
+
+    @ui.button(label="不同意", style=discord.ButtonStyle.danger)
+    async def deny(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.defer()
+        # Disable Transfer button on original order message if we can find it
+        thread = interaction.guild.get_thread(self.thread_id)
+        if thread:
+            try:
+                order_msg = await thread.fetch_message(self.order_message_id)
+                if order_msg.view is None and order_msg.components:
+                    pass  # rebuild disabled transfer via new view snapshot
+                # Re-send state: disable only transfer by editing with a view flag in DB
+                plane_order_upsert(
+                    self.thread_id,
+                    interaction.guild.id,
+                    status="open",
+                    rc_period=None,
+                )
+                # Try to disable transfer on stored view by re-posting disabled state
+                view = PlaneOrderView(
+                    thread_id=self.thread_id,
+                    layout="full",
+                    transfer_disabled=True,
+                )
+                await order_msg.edit(view=view)
+            except discord.HTTPException:
+                pass
+
+        for child in self.children:
+            child.disabled = True
+        await interaction.message.edit(view=self)
+        await interaction.followup.send("⛔ Transfer denied. Transfer button disabled.", ephemeral=True)
+
+
+class PlaneRCPeriodSelect(ui.Select):
+    def __init__(self, thread_id: int, order_message_id: int):
+        super().__init__(
+            placeholder="Weekly or Monthly?",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(label="Weekly", value="weekly"),
+                discord.SelectOption(label="Monthly", value="monthly"),
+            ],
+        )
+        self.thread_id = thread_id
+        self.order_message_id = order_message_id
+
+    async def callback(self, interaction: discord.Interaction):
+        period = self.values[0]
+        await interaction.response.send_message(
+            f"<@{USER_RC_REVIEW_1}> Recurring **{period}** requested in <#{self.thread_id}>.\n"
+            f"Reviewers: approve or deny.",
+            view=PlaneRCApproveView(self.thread_id, period, self.order_message_id),
+        )
+        plane_order_upsert(
+            self.thread_id,
+            interaction.guild.id,
+            status="rc_pending",
+            rc_period=period,
+        )
+
+
+class PlaneRCPeriodView(ui.View):
+    def __init__(self, thread_id: int, order_message_id: int):
+        super().__init__(timeout=120)
+        self.add_item(PlaneRCPeriodSelect(thread_id, order_message_id))
+
+
+class PlaneAssignSelect(ui.Select):
+    def __init__(self, thread_id: int, order_message_id: int, members: list[discord.Member]):
+        options = [
+            discord.SelectOption(
+                label=(m.display_name or m.name)[:100],
+                value=str(m.id),
+            )
+            for m in members[:25]
+        ]
+        if not options:
+            options = [discord.SelectOption(label="No members", value="0")]
+        super().__init__(
+            placeholder="Assign to…",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+        self.thread_id = thread_id
+        self.order_message_id = order_message_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "0":
+            return await interaction.response.send_message("❌ No members.", ephemeral=True)
+        uid = int(self.values[0])
+        await interaction.response.defer()
+        thread = interaction.channel
+        try:
+            msg = await thread.fetch_message(self.order_message_id)
+        except discord.HTTPException:
+            return await interaction.followup.send("❌ Order message not found.", ephemeral=True)
+
+        await _plane_edit_status_line(msg, f"👉 Taken over by：<@{uid}>")
+        view = PlaneOrderView(
+            thread_id=self.thread_id,
+            layout=getattr(self.view, "layout", "full"),
+            take_assign_disabled=True,
+        )
+        await msg.edit(view=view)
+        plane_order_upsert(
+            self.thread_id,
+            interaction.guild.id,
+            status="taken",
+            taken_by=str(uid),
+            prev_status="open",
+        )
+        await interaction.followup.send(f"✅ Assigned to <@{uid}>.", ephemeral=True)
+
+
+class PlaneAssignView(ui.View):
+    def __init__(self, thread_id: int, order_message_id: int, members: list[discord.Member], layout: str):
+        super().__init__(timeout=120)
+        self.layout = layout
+        self.add_item(PlaneAssignSelect(thread_id, order_message_id, members))
+
+
+class PlaneOrderView(ui.View):
+    """
+    layout:
+      - "full"  : Take Over | Transfer | Assign | Completed
+      - "b"     : Take Over | Completed
+      - "c"     : Take Over | Assign | Completed
+    """
+
+    def __init__(
+        self,
+        thread_id: int,
+        layout: str = "full",
+        take_assign_disabled: bool = False,
+        transfer_disabled: bool = False,
+        all_disabled: bool = False,
+    ):
+        super().__init__(timeout=None)
+        self.thread_id = thread_id
+        self.layout = layout
+
+        def maybe_disable(btn, force=False):
+            btn.disabled = all_disabled or force
+
+        # Take Over
+        self.btn_take = ui.Button(
+            label="Take Over",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"plane:take:{thread_id}",
+        )
+        self.btn_take.callback = self._take_over
+        maybe_disable(self.btn_take, take_assign_disabled)
+        self.add_item(self.btn_take)
+
+        if layout == "full":
+            self.btn_transfer = ui.Button(
+                label="Transfer to Recurring Investing",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"plane:rc:{thread_id}",
+            )
+            self.btn_transfer.callback = self._transfer
+            maybe_disable(self.btn_transfer, transfer_disabled)
+            self.add_item(self.btn_transfer)
+
+        if layout in ("full", "c"):
+            self.btn_assign = ui.Button(
+                label="Assign",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"plane:assign:{thread_id}",
+            )
+            self.btn_assign.callback = self._assign
+            maybe_disable(self.btn_assign, take_assign_disabled)
+            self.add_item(self.btn_assign)
+
+        self.btn_done = ui.Button(
+            label="Completed",
+            style=discord.ButtonStyle.success,
+            custom_id=f"plane:done:{thread_id}",
+        )
+        self.btn_done.callback = self._completed
+        maybe_disable(self.btn_done, False)
+        if all_disabled:
+            self.btn_done.disabled = True
+        self.add_item(self.btn_done)
+
+    async def _take_over(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await _plane_edit_status_line(
+            interaction.message,
+            f"👉 Taken over by：{interaction.user.mention}",
+        )
+        new_view = PlaneOrderView(
+            thread_id=self.thread_id,
+            layout=self.layout,
+            take_assign_disabled=True,
+        )
+        await interaction.message.edit(view=new_view)
+        plane_order_upsert(
+            self.thread_id,
+            interaction.guild.id,
+            status="taken",
+            taken_by=str(interaction.user.id),
+            message_id=str(interaction.message.id),
+            prev_status="open",
+        )
+
+    async def _transfer(self, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            "Select recurring period:",
+            view=PlaneRCPeriodView(self.thread_id, interaction.message.id),
+            ephemeral=True,
+        )
+
+    async def _assign(self, interaction: discord.Interaction):
+        if not isinstance(interaction.user, discord.Member) or not _plane_has_assign_role(
+            interaction.user
+        ):
+            return await interaction.response.send_message(
+                "❌ Only members with the assign role can use this.",
+                ephemeral=True,
+            )
+        role = interaction.guild.get_role(ROLE_SELL_B)
+        members = [m for m in (role.members if role else []) if not m.bot][:25]
+        await interaction.response.send_message(
+            "Pick a member:",
+            view=PlaneAssignView(
+                self.thread_id, interaction.message.id, members, self.layout
+            ),
+            ephemeral=True,
+        )
+
+    async def _completed(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        thread = interaction.channel
+        if not isinstance(thread, discord.Thread):
+            return await interaction.followup.send("❌ Not a thread.", ephemeral=True)
+
+        # status line
+        await _plane_edit_status_line(interaction.message, "【Status: Completed】")
+
+        # title
+        title = thread.name or ""
+        if not title.startswith("[Completed] "):
+            try:
+                await thread.edit(name=("[Completed] " + title)[:100])
+            except discord.HTTPException:
+                pass
+
+        # tags → only completed tag; lock + archive
+        parent = thread.parent
+        new_tags = []
+        if isinstance(parent, discord.ForumChannel):
+            tag = discord.utils.get(parent.available_tags, id=TAG_COMPLETED)
+            if tag:
+                new_tags = [tag]
+        try:
+            await thread.edit(applied_tags=new_tags, locked=True, archived=True)
+        except discord.HTTPException as e:
+            await interaction.followup.send(f"⚠️ Partial complete: {e}", ephemeral=True)
+
+        done_view = PlaneOrderView(
+            thread_id=self.thread_id,
+            layout=self.layout,
+            all_disabled=True,
+        )
+        await interaction.message.edit(view=done_view)
+        plane_order_upsert(
+            self.thread_id,
+            interaction.guild.id,
+            status="completed",
+            prev_status="taken",
+            prev_title=title,
+        )
+        await interaction.followup.send("✅ Marked completed, locked & closed.", ephemeral=True)
 
 # =================================================================
 # 🔄 3. CORE UTILITIES (核心工具函式與變數解析)
@@ -4525,6 +4926,55 @@ async def removepaidserver(interaction: discord.Interaction, guild_id: str, feat
 # ⚡ 7. SYSTEM EVENTS
 # =================================================================
 
+@tasks.loop(minutes=1)
+async def plane_rc_delivery_reminders():
+    """UTC+8 12:00 — weekly on Monday, monthly on day 1."""
+    tz = datetime.timezone(datetime.timedelta(hours=8))
+    now = datetime.datetime.now(tz)
+    if now.hour != 12 or now.minute != 0:
+        return
+
+    want = []
+    if now.weekday() == 0:  # Monday
+        want.append("weekly")
+    if now.day == 1:
+        want.append("monthly")
+    if not want:
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    placeholders = ",".join("?" * len(want))
+    cursor.execute(
+        f"SELECT thread_id, guild_id, rc_period FROM plane_orders "
+        f"WHERE rc_period IN ({placeholders}) AND status != 'completed'",
+        want,
+    )
+    rows = cursor.fetchall()
+    conn.close()
+
+    for thread_id, guild_id, period in rows:
+        guild = bot.get_guild(int(guild_id))
+        if not guild:
+            continue
+        thread = guild.get_thread(int(thread_id))
+        if thread is None:
+            try:
+                thread = await guild.fetch_channel(int(thread_id))
+            except discord.HTTPException:
+                continue
+        try:
+            await thread.send(
+                f"<@{USER_RC_REVIEW_1}> Reminder: **{period}** recurring delivery is due."
+            )
+        except discord.HTTPException:
+            pass
+
+
+@plane_rc_delivery_reminders.before_loop
+async def before_plane_rc_loop():
+    await bot.wait_until_ready()
+
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
@@ -4532,6 +4982,9 @@ async def on_ready():
         try: bot.invites[guild.id] = await guild.invites()
         except: pass
 
+    if not plane_rc_delivery_reminders.is_running():
+    plane_rc_delivery_reminders.start()
+    
     # 🎯 幫還沒有 Webhook 紀錄的既有伺服器（bot 加入時這個功能還不存在）補跑一次
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
     cursor.execute("SELECT guild_id FROM guild_webhooks")
@@ -4560,6 +5013,8 @@ async def on_ready():
                         voice_sessions[(gid, str(m.id))] = now
             except Exception as e:
                 logger.error(f"[Voice Reconnect 錯誤]: {e}")
+
+
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
@@ -4802,6 +5257,213 @@ async def tavily_search(query: str) -> str:
         logger.error(f"[Tavily 執行錯誤]: {e}")
         return "搜尋時發生錯誤。"
 
+@bot.event
+async def on_thread_create(thread: discord.Thread):
+    if thread.guild is None or thread.guild.id != PLANE_GUILD_ID:
+        return
+    if thread.parent_id != PLANE_FORUM_ID:
+        return
+    # 只處理論壇貼文
+    await handle_plane_forum_post(thread)
+    view = PlaneOrderView(thread.id, layout="full")  # or "b" / "c"
+    msg = await thread.send(content=text, view=view)
+    plane_order_upsert(thread.id, thread.guild.id, message_id=str(msg.id), status="open")
+    # 重啟後按鈕仍可用：
+    bot.add_view(PlaneOrderView(thread.id, layout="full"))  # 較好在 on_ready 從 DB 批次 add_view
+
+async def handle_plane_prefix(message: discord.Message, rest: str):
+    thread = message.channel
+    assert isinstance(thread, discord.Thread)
+    parts = rest.split()
+    if not parts:
+        return
+    cmd = parts[0].lower()
+    args = parts[1:]
+    uid = message.author.id
+    is_rev = _plane_is_reviewer(uid)
+
+    async def find_order_message():
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT message_id FROM plane_orders WHERE thread_id = ?",
+            (str(thread.id),),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row or not row[0]:
+            return None
+        try:
+            return await thread.fetch_message(int(row[0]))
+        except discord.HTTPException:
+            return None
+
+    # takeover
+    if cmd == "takeover":
+        msg = await find_order_message()
+        if not msg:
+            return await message.reply("❌ Order message not found.")
+        await _plane_edit_status_line(msg, f"👉 Taken over by：{message.author.mention}")
+        layout = "full"
+        await msg.edit(
+            view=PlaneOrderView(thread.id, layout=layout, take_assign_disabled=True)
+        )
+        plane_order_upsert(
+            thread.id, message.guild.id, status="taken", taken_by=str(uid), prev_status="open"
+        )
+        return await message.reply("✅ Taken over.")
+
+    # complete
+    if cmd == "complete":
+        msg = await find_order_message()
+        title = thread.name or ""
+        if msg:
+            await _plane_edit_status_line(msg, "【Status: Completed】")
+            await msg.edit(view=PlaneOrderView(thread.id, layout="full", all_disabled=True))
+        if not title.startswith("[Completed] "):
+            try:
+                await thread.edit(name=("[Completed] " + title)[:100])
+            except discord.HTTPException:
+                pass
+        parent = thread.parent
+        new_tags = []
+        if isinstance(parent, discord.ForumChannel):
+            tag = discord.utils.get(parent.available_tags, id=TAG_COMPLETED)
+            if tag:
+                new_tags = [tag]
+        try:
+            await thread.edit(applied_tags=new_tags, locked=True, archived=True)
+        except discord.HTTPException as e:
+            return await message.reply(f"⚠️ {e}")
+        plane_order_upsert(
+            thread.id, message.guild.id, status="completed", prev_title=title
+        )
+        return await message.reply("✅ Completed.")
+
+    # assign @user
+    if cmd == "assign":
+        if not isinstance(message.author, discord.Member) or not _plane_has_assign_role(
+            message.author
+        ):
+            return await message.reply("❌ No permission.")
+        target = None
+        if message.mentions:
+            target = message.mentions[0]
+        elif args and args[0].isdigit():
+            target = message.guild.get_member(int(args[0]))
+        if not target:
+            return await message.reply("❌ Usage: `m.assign @user`")
+        msg = await find_order_message()
+        if not msg:
+            return await message.reply("❌ Order message not found.")
+        await _plane_edit_status_line(msg, f"👉 Taken over by：{target.mention}")
+        await msg.edit(
+            view=PlaneOrderView(thread.id, layout="full", take_assign_disabled=True)
+        )
+        plane_order_upsert(
+            thread.id, message.guild.id, status="taken", taken_by=str(target.id)
+        )
+        return await message.reply(f"✅ Assigned to {target.mention}.")
+
+    # rc weekly|monthly
+    if cmd == "rc":
+        if not is_rev:
+            return await message.reply("❌ No permission.")
+        if not args or args[0].lower() not in ("weekly", "monthly"):
+            return await message.reply("❌ Usage: `m.rc weekly` or `m.rc monthly`")
+        period = args[0].lower()
+        prefix = "[Weekly] " if period == "weekly" else "[Monthly] "
+        title = thread.name or ""
+        if not title.startswith("[Weekly] ") and not title.startswith("[Monthly] "):
+            try:
+                await thread.edit(name=(prefix + title)[:100])
+            except discord.HTTPException as e:
+                return await message.reply(f"❌ {e}")
+        plane_order_upsert(
+            thread.id,
+            message.guild.id,
+            status=f"rc_{period}",
+            rc_period=period,
+            prev_title=title,
+        )
+        return await message.reply(f"✅ Set recurring **{period}**.")
+
+    # back
+    if cmd == "back":
+        if not is_rev:
+            return await message.reply("❌ No permission.")
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT prev_status, prev_title, status FROM plane_orders WHERE thread_id = ?",
+            (str(thread.id),),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return await message.reply("❌ No history.")
+        prev_status, prev_title, _ = row
+        if prev_title:
+            try:
+                await thread.edit(name=prev_title[:100])
+            except discord.HTTPException:
+                pass
+        plane_order_upsert(
+            thread.id, message.guild.id, status=prev_status or "open", rc_period=None
+        )
+        return await message.reply("✅ Reverted last step (best-effort).")
+
+    # lock / unlock / close / open
+    if cmd == "lock":
+        if not is_rev:
+            return await message.reply("❌ No permission.")
+        await thread.edit(locked=True)
+        return await message.reply("🔒 Locked.")
+
+    if cmd == "unlock":
+        if not is_rev:
+            return await message.reply("❌ No permission.")
+        await thread.edit(locked=False)
+        return await message.reply("🔓 Unlocked.")
+
+    if cmd == "close":
+        if not is_rev:
+            return await message.reply("❌ No permission.")
+        await thread.edit(archived=True)
+        return await message.reply("📁 Closed.")
+
+    if cmd == "open":
+        if not is_rev:
+            return await message.reply("❌ No permission.")
+        await thread.edit(archived=False, locked=False)
+        return await message.reply("📂 Opened.")
+
+    # rcdelivery
+    if cmd == "rcdelivery":
+        if not is_rev:
+            return await message.reply("❌ No permission.")
+        await thread.send(
+            f"<@{USER_RC_REVIEW_1}> Manual recurring delivery reminder."
+        )
+        return await message.reply("✅ Sent.")
+
+    # rcreturn
+    if cmd == "rcreturn":
+        if not is_rev:
+            return await message.reply("❌ No permission.")
+        title = thread.name or ""
+        for p in ("[Weekly] ", "[Monthly] "):
+            if title.startswith(p):
+                title = title[len(p) :]
+                break
+        try:
+            await thread.edit(name=title[:100] or "order")
+        except discord.HTTPException as e:
+            return await message.reply(f"❌ {e}")
+        plane_order_upsert(
+            thread.id, message.guild.id, status="open", rc_period=None
+        )
+        return await message.reply("✅ Returned to normal order.")
 
 @bot.event  # 🎯 已將 @client.event 修改為 @bot.event
 async def on_message_delete(message):
@@ -4816,7 +5478,18 @@ async def on_message_delete(message):
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
-
+    # ----- Plane order prefix commands (m.) -----
+    raw = (message.content or "").strip()
+    if raw.lower().startswith("m."):
+        if (
+            message.guild
+            and message.guild.id == PLANE_GUILD_ID
+            and isinstance(message.channel, discord.Thread)
+            and message.channel.parent_id == PLANE_FORUM_ID
+        ):
+            await handle_plane_prefix(message, raw[2:].strip())
+        return  # 不讓 m. 進 AI；若要進 AI 就刪掉這行 return
+        
     # ----- 67+AI trigger -----
     trigger_ai = False
     require_mention = True
