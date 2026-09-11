@@ -3407,6 +3407,246 @@ class ProfileSettingsView(ui.View):
             )
         await interaction.response.send_modal(ProfileEditModal(interaction.guild_id))
 
+# =================================================================
+# Settings hub (Container categories + select)
+# =================================================================
+
+class SettingsSelect(ui.Select):
+    def __init__(self, guild_id: int):
+        self.guild_id = guild_id
+        options = [
+            discord.SelectOption(
+                label="Welcome/Goodbye Panel",
+                value="welcome",
+                emoji="<:shake_hand_grey:1547899561018658816>",
+            ),
+            discord.SelectOption(
+                label="Customize Profile",
+                value="profile",
+                emoji="<:profile_grey:1547899599455264848>",
+            ),
+            discord.SelectOption(
+                label="Level System",
+                value="level",
+                emoji="<:level_grey:1547899589498249306>",
+            ),
+            discord.SelectOption(
+                label="Streaks System",
+                value="streaks",
+                emoji="<:streaks_grey:1547899591540744242>",
+            ),
+            discord.SelectOption(
+                label="Counting",
+                value="counting",
+                emoji="<:number_grey:1547899597165301850>",
+            ),
+            discord.SelectOption(
+                label="67+AI",
+                value="ai",
+                emoji="<:bot_grey:1547899602848448633>",
+            ),
+            discord.SelectOption(
+                label="Auto Reply (toggle)",
+                value="autoreply",
+                emoji="<:reply_grey:1547901390473400360>",
+                description="Select once to turn ON/OFF",
+            ),
+            discord.SelectOption(
+                label="Auto Mute",
+                value="automute",
+                emoji="<:mute_grey:1547899593167994990>",
+            ),
+            discord.SelectOption(
+                label="Auto Reaction",
+                value="autoreact",
+                emoji="<:emoji_grey:1547899600914874379>",
+            ),
+            discord.SelectOption(
+                label="Time Message",
+                value="timemsg",
+                emoji="<:time_message_grey:1547899595390984212>",
+            ),
+            # Warn intentionally omitted from select (coming soon)
+        ]
+        super().__init__(
+            placeholder="Choose a setting for more information",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        key = self.values[0]
+        gid = self.guild_id
+
+        try:
+            if key == "welcome":
+                view = WelcomeConfigView(gid)
+                return await interaction.response.edit_message(
+                    embed=view.build_embed(interaction.guild),
+                    view=view,
+                    content=None,
+                )
+
+            if key == "profile":
+                view = ProfileSettingsView(gid)
+                embed = view.build_embed(interaction.guild) if hasattr(view, "build_embed") else None
+                return await interaction.response.edit_message(
+                    embed=embed,
+                    view=view,
+                    content=None,
+                )
+
+            if key == "level":
+                view = LevelSettingsView(gid)
+                return await interaction.response.edit_message(
+                    embed=view.build_embed(interaction.guild),
+                    view=view,
+                    content=None,
+                )
+
+            if key == "streaks":
+                view = StreaksMainView(gid)
+                return await interaction.response.edit_message(
+                    embed=view.build_embed(interaction.guild),
+                    view=view,
+                    content=None,
+                )
+
+            if key == "counting":
+                view = CountingConfigView(gid)
+                return await interaction.response.edit_message(
+                    embed=view.build_embed(interaction.guild),
+                    view=view,
+                    content=None,
+                )
+
+            if key == "ai":
+                view = AIConfigView(gid)
+                embed = view.build_embed(interaction.guild) if hasattr(view, "build_embed") else None
+                return await interaction.response.edit_message(
+                    embed=embed,
+                    view=view,
+                    content=None,
+                )
+
+            if key == "autoreply":
+                cur = is_autoreply_enabled(gid)
+                set_feature_enabled(gid, "autoreply67", not cur)
+                state = "ON" if not cur else "OFF"
+                await interaction.response.edit_message(
+                    embed=None,
+                    content=None,
+                    view=SettingsLayoutView(gid),
+                )
+                return await interaction.followup.send(
+                    f"✅ Auto Reply is now **{state}**.",
+                    ephemeral=True,
+                )
+
+            if key == "automute":
+                view = AutoMuteConfigView(gid)
+                return await interaction.response.edit_message(
+                    embed=view.build_embed(interaction.guild),
+                    view=view,
+                    content=None,
+                )
+
+            if key == "autoreact":
+                return await interaction.response.edit_message(
+                    embed=None,
+                    content=None,
+                    view=AutoReactionLayoutView(gid),
+                )
+
+            if key == "timemsg":
+                view = TimeMessageConfigView(gid)
+                return await interaction.response.edit_message(
+                    embed=view.build_embed(interaction.guild),
+                    view=view,
+                    content=None,
+                )
+
+            await interaction.response.send_message("❌ Unknown setting.", ephemeral=True)
+        except Exception as e:
+            logger.error(f"[SettingsSelect] {key}: {e}")
+            if interaction.response.is_done():
+                await interaction.followup.send(f"❌ {e}", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+
+
+class SettingsLayoutView(ui.LayoutView):
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+
+        ar = "on" if is_autoreply_enabled(guild_id) else "off"
+
+        body_server = (
+            "**Server**\n"
+            "- <:shake_hand_grey:1547899561018658816> Welcome/Goodbye Panel\n"
+            "- <:profile_grey:1547899599455264848> Customize Profile"
+        )
+        body_activity = (
+            "**Activity**\n"
+            "- <:level_grey:1547899589498249306> Level System\n"
+            "- <:streaks_grey:1547899591540744242> Streaks System"
+        )
+        body_ent = (
+            "**Entertainment**\n"
+            "- <:number_grey:1547899597165301850> Counting\n"
+            "- <:bot_grey:1547899602848448633> 67+AI\n"
+            f"- <:reply_grey:1547901390473400360> Auto Reply (`{ar}` — select to toggle)"
+        )
+        body_mod = (
+            "**Moderation**\n"
+            "- <:mute_grey:1547899593167994990> Auto Mute\n"
+            "- <:emoji_grey:1547899600914874379> Auto Reaction\n"
+            "- <:time_message_grey:1547899595390984212> Time Message\n"
+            "- <:warn_grey:1547901810415505419> Warn *(coming soon)*"
+        )
+
+        self.add_item(
+            ui.Container(
+                ui.TextDisplay("# 67 Settings"),
+                ui.TextDisplay(body_server),
+                ui.TextDisplay(body_activity),
+                ui.TextDisplay(body_ent),
+                ui.TextDisplay(body_mod),
+                ui.ActionRow(SettingsSelect(guild_id)),
+                accent_color=0x2B2D31,
+            )
+        )
+
+
+@bot.tree.command(name="settings", description="Open bot configuration hub")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def settings(interaction: discord.Interaction):
+    if not interaction.guild:
+        return await interaction.response.send_message(
+            "❌ Settings can only be used in a server.",
+        )
+    await interaction.response.send_message(
+        view=SettingsLayoutView(interaction.guild.id),
+    )
+
+
+@settings.error
+async def settings_error(
+    interaction: discord.Interaction, error: app_commands.AppCommandError
+):
+    if isinstance(error, app_commands.MissingPermissions):
+        msg = "❌ You need the **Manage Server** permission to open Settings."
+        if interaction.response.is_done():
+            await interaction.followup.send(msg)
+        else:
+            await interaction.response.send_message(msg)  # public, not ephemeral
+        return
+    logger.error(f"[/settings error]: {error}")
+    if not interaction.response.is_done():
+        await interaction.response.send_message(f"❌ Something went wrong: {error}")
+
 class SettingsView(ui.View):
     def __init__(self, guild_id: int = None):
         super().__init__(timeout=None)
@@ -3564,9 +3804,32 @@ async def help_cmd(interaction: discord.Interaction):
 @bot.tree.command(name="settings", description="Open bot configuration hub")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def settings(interaction: discord.Interaction):
-    embed = discord.Embed(title="Settings", color=0xdfe600, description="Welcome/Goodbye Panel\nLevel System\nStreaks\nCounting\nAuto Mute\nTime Message\nCustomize profile")
-    embed.set_footer(text=f"{interaction.guild.name}｜67")
-    await interaction.response.send_message(embed=embed, view=SettingsView(interaction.guild_id))
+    if not interaction.guild:
+        return await interaction.response.send_message(
+            "❌ Settings can only be used in a server.",
+            ephemeral=False,
+        )
+    await interaction.response.send_message(
+        view=SettingsLayoutView(interaction.guild.id),
+    )
+
+
+@settings.error
+async def settings_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        msg = "❌ You need the **Manage Server** permission to open Settings."
+        if interaction.response.is_done():
+            await interaction.followup.send(msg)
+        else:
+            await interaction.response.send_message(msg)  # 公開，不要 ephemeral=True
+        return
+    # 其他錯誤可選記錄
+    logger.error(f"[/settings error]: {error}")
+    if not interaction.response.is_done():
+        await interaction.response.send_message(
+            f"❌ Something went wrong: {error}",
+            ephemeral=False,
+        )
 
 @bot.tree.command(name="manualmsg", description="Send a message with bot (Moderators only, and u can add a 67+AI Watermark.")
 @app_commands.allowed_installs(guilds=True, users=True)
