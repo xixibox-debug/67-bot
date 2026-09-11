@@ -3801,35 +3801,6 @@ async def help_cmd(interaction: discord.Interaction):
     embed.set_footer(text=f"{interaction.guild.name}｜67" if interaction.guild else "67")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="settings", description="Open bot configuration hub")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def settings(interaction: discord.Interaction):
-    if not interaction.guild:
-        return await interaction.response.send_message(
-            "❌ Settings can only be used in a server.",
-            ephemeral=False,
-        )
-    await interaction.response.send_message(
-        view=SettingsLayoutView(interaction.guild.id),
-    )
-
-
-@settings.error
-async def settings_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingPermissions):
-        msg = "❌ You need the **Manage Server** permission to open Settings."
-        if interaction.response.is_done():
-            await interaction.followup.send(msg)
-        else:
-            await interaction.response.send_message(msg)  # 公開，不要 ephemeral=True
-        return
-    # 其他錯誤可選記錄
-    logger.error(f"[/settings error]: {error}")
-    if not interaction.response.is_done():
-        await interaction.response.send_message(
-            f"❌ Something went wrong: {error}",
-            ephemeral=False,
-        )
 
 @bot.tree.command(name="manualmsg", description="Send a message with bot (Moderators only, and u can add a 67+AI Watermark.")
 @app_commands.allowed_installs(guilds=True, users=True)
