@@ -3475,7 +3475,7 @@ class SettingsSelect(ui.Select):
             options=options,
         )
 
-        async def callback(self, interaction: discord.Interaction):
+async def callback(self, interaction: discord.Interaction):
         key = self.values[0]
         gid = self.guild_id
 
