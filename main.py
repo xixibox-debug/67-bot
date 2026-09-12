@@ -3475,68 +3475,76 @@ class SettingsSelect(ui.Select):
             options=options,
         )
 
-    async def callback(self, interaction: discord.Interaction):
+        async def callback(self, interaction: discord.Interaction):
         key = self.values[0]
         gid = self.guild_id
 
         try:
+            # V2 主畫面不能 edit 成 embed → 舊設定頁改 send_message
             if key == "welcome":
                 view = WelcomeConfigView(gid)
-                return await interaction.response.edit_message(
+                return await interaction.response.send_message(
                     embed=view.build_embed(interaction.guild),
                     view=view,
-                    content=None,
+                    ephemeral=True,
                 )
 
             if key == "profile":
                 view = ProfileSettingsView(gid)
-                embed = view.build_embed(interaction.guild) if hasattr(view, "build_embed") else None
-                return await interaction.response.edit_message(
+                embed = (
+                    view.build_embed(interaction.guild)
+                    if hasattr(view, "build_embed")
+                    else None
+                )
+                return await interaction.response.send_message(
                     embed=embed,
                     view=view,
-                    content=None,
+                    ephemeral=True,
                 )
 
             if key == "level":
                 view = LevelSettingsView(gid)
-                return await interaction.response.edit_message(
+                return await interaction.response.send_message(
                     embed=view.build_embed(interaction.guild),
                     view=view,
-                    content=None,
+                    ephemeral=True,
                 )
 
             if key == "streaks":
                 view = StreaksMainView(gid)
-                return await interaction.response.edit_message(
+                return await interaction.response.send_message(
                     embed=view.build_embed(interaction.guild),
                     view=view,
-                    content=None,
+                    ephemeral=True,
                 )
 
             if key == "counting":
                 view = CountingConfigView(gid)
-                return await interaction.response.edit_message(
+                return await interaction.response.send_message(
                     embed=view.build_embed(interaction.guild),
                     view=view,
-                    content=None,
+                    ephemeral=True,
                 )
 
             if key == "ai":
                 view = AIConfigView(gid)
-                embed = view.build_embed(interaction.guild) if hasattr(view, "build_embed") else None
-                return await interaction.response.edit_message(
+                embed = (
+                    view.build_embed(interaction.guild)
+                    if hasattr(view, "build_embed")
+                    else None
+                )
+                return await interaction.response.send_message(
                     embed=embed,
                     view=view,
-                    content=None,
+                    ephemeral=True,
                 )
 
             if key == "autoreply":
+                # 仍是 V2、無 embed → 可 edit 主畫面
                 cur = is_autoreply_enabled(gid)
                 set_feature_enabled(gid, "autoreply67", not cur)
                 state = "ON" if not cur else "OFF"
                 await interaction.response.edit_message(
-                    embed=None,
-                    content=None,
                     view=SettingsLayoutView(gid),
                 )
                 return await interaction.followup.send(
@@ -3546,28 +3554,30 @@ class SettingsSelect(ui.Select):
 
             if key == "automute":
                 view = AutoMuteConfigView(gid)
-                return await interaction.response.edit_message(
+                return await interaction.response.send_message(
                     embed=view.build_embed(interaction.guild),
                     view=view,
-                    content=None,
+                    ephemeral=True,
                 )
 
             if key == "autoreact":
+                # AutoReaction 也是 LayoutView/V2 → 可 edit
                 return await interaction.response.edit_message(
-                    embed=None,
-                    content=None,
                     view=AutoReactionLayoutView(gid),
                 )
 
             if key == "timemsg":
                 view = TimeMessageConfigView(gid)
-                return await interaction.response.edit_message(
+                return await interaction.response.send_message(
                     embed=view.build_embed(interaction.guild),
                     view=view,
-                    content=None,
+                    ephemeral=True,
                 )
 
-            await interaction.response.send_message("❌ Unknown setting.", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ Unknown setting.",
+                ephemeral=True,
+            )
         except Exception as e:
             logger.error(f"[SettingsSelect] {key}: {e}")
             if interaction.response.is_done():
