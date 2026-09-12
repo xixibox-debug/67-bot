@@ -3475,7 +3475,7 @@ class SettingsSelect(ui.Select):
             options=options,
         )
 
-async def callback(self, interaction: discord.Interaction):
+    async def callback(self, interaction: discord.Interaction):
         key = self.values[0]
         gid = self.guild_id
 
@@ -3540,7 +3540,6 @@ async def callback(self, interaction: discord.Interaction):
                 )
 
             if key == "autoreply":
-                # 仍是 V2、無 embed → 可 edit 主畫面
                 cur = is_autoreply_enabled(gid)
                 set_feature_enabled(gid, "autoreply67", not cur)
                 state = "ON" if not cur else "OFF"
@@ -3561,7 +3560,6 @@ async def callback(self, interaction: discord.Interaction):
                 )
 
             if key == "autoreact":
-                # AutoReaction 也是 LayoutView/V2 → 可 edit
                 return await interaction.response.edit_message(
                     view=AutoReactionLayoutView(gid),
                 )
