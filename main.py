@@ -376,14 +376,9 @@ async def execute_agent_tool(tool_name: str, args: dict, invoker: discord.Member
         )
         embed.set_footer(text=f"{guild.name}｜67")
         try:
-            dm_embed = discord.Embed(
-                title="⚠️ Warn",
-                color=0xff8500,
-                description=f"You have received a warn from {guild.name} by {invoker.name}\nWarn message:\n```\n{warn_msg}\n```"
+            await target.send(
+                view=build_warn_dm_view(guild.name, invoker, warn_msg)
             )
-            dm_embed.set_footer(text=f"{guild.name}")
-            dm_embed.timestamp = discord.utils.utcnow()
-            await target.send(embed=dm_embed)
         except discord.Forbidden:
             pass
         return embed, None
@@ -2980,6 +2975,34 @@ class AutoReactionLayoutView(ui.LayoutView):
         await interaction.response.edit_message(view=view)
 
 
+def build_warn_dm_view(
+    guild_name: str,
+    warner: discord.abc.User,
+    warn_msg: str,
+) -> ui.LayoutView:
+    """使用者收到的警告私訊（Components V2 Container）。"""
+    # 長文用 > 做成引用區塊（與示意圖一致）
+    quoted = "\n".join(f"> {line}" if line else ">" for line in (warn_msg or "").splitlines())
+    if not quoted.strip():
+        quoted = "> (no message)"
+
+    view = ui.LayoutView(timeout=None)
+    view.add_item(
+        ui.Container(
+            ui.TextDisplay("<:warn_yellow:1549249358006976613> **Warn**"),
+            ui.Separator(),
+            ui.TextDisplay(
+                f"You have received a warn from `{guild_name}` by {warner.mention}."
+            ),
+            ui.TextDisplay("Warn message:"),
+            ui.TextDisplay(quoted),
+            ui.Separator(),
+            ui.TextDisplay("To reply this run, just reply this message directly."),
+            accent_color=0xFFFD00,
+        )
+    )
+    return view
+
 class WarnModal(ui.Modal, title="Send a Warning"):
     reason = ui.TextInput(label="Warning message", style=discord.TextStyle.long, required=True, max_length=1000)
 
@@ -3000,19 +3023,15 @@ class WarnModal(ui.Modal, title="Send a Warning"):
         await interaction.response.send_message(embed=channel_embed)
 
         try:
-            dm_embed = discord.Embed(
-                title="⚠️ Warn",
-                color=0xff8500,
-                description=(
-                    f"You have received a warn from `{interaction.guild.name}` by `{interaction.user.name}`\n"
-                    f"Warn message:\n```\n{self.reason.value}\n```"
+            await self.target.send(
+                view=build_warn_dm_view(
+                    interaction.guild.name,
+                    interaction.user,
+                    self.reason.value,
                 )
             )
-            dm_embed.set_footer(text=f"{interaction.guild.name}")
-            dm_embed.timestamp = discord.utils.utcnow()  # 🎯 Discord 會自動換算成收訊者自己的當地時間顯示
-            await self.target.send(embed=dm_embed)
         except discord.Forbidden:
-            pass  # 對方關閉私訊，公開頻道那則還是有發出去
+            pass  # 對方關私訊，頻道那則仍已送出
 
 
 @bot.tree.command(name="warn", description="Warn a member (and sent via DM)")
