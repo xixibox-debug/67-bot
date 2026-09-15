@@ -356,10 +356,34 @@ async def execute_agent_tool(tool_name: str, args: dict, invoker: discord.Member
             embed = discord.Embed(
                 title=parse_placeholders("✅ {user.name} has been banned.", target, guild),
                 color=0xe74c3c,
-                description=parse_placeholders("Reason: {reason}", target, guild, extra={"reason": reason})
+                description=parse_placeholders(
+                    "Reason: {reason}", target, guild, extra={"reason": reason}
+                ),
             )
-                    embed.set_footer(text=f"{guild.name}｜67")
+            embed.set_footer(text=f"{guild.name}｜67")
+            return embed, None
+        except discord.Forbidden:
+            return None, "❌ Call any moderator to give me a higher privileges."
 
+    elif tool_name == "warn_member":
+        if not invoker.guild_permissions.moderate_members:
+            return None, "❌ You don't have permission to warn members."
+        warn_msg = (args.get("warn_message") or "").strip()
+        if not warn_msg:
+            return None, "❌ No warning message provided."
+
+        # 頻道公開訊息（管理員看的，暫時維持 embed）
+        embed = discord.Embed(
+            title="⚠️ Warn",
+            color=0xff8500,
+            description=(
+                f"`{target.name}` got warned by `{invoker.name}`\n"
+                f"Warn message:\n```\n{warn_msg}\n```"
+            ),
+        )
+        embed.set_footer(text=f"{guild.name}｜67")
+
+        # 使用者私訊（Container）
         dm_id = None
         try:
             dm_msg = await target.send(
@@ -368,27 +392,16 @@ async def execute_agent_tool(tool_name: str, args: dict, invoker: discord.Member
             dm_id = str(dm_msg.id)
         except discord.Forbidden:
             pass
-        except NameError:
-            try:
-                dm_embed = discord.Embed(
-                    title="⚠️ Warn",
-                    color=0xff8500,
-                    description=(
-                        f"You have received a warn from {guild.name} by {invoker.name}\n"
-                        f"Warn message:\n```\n{warn_msg}\n```"
-                    ),
-                )
-                dm_embed.set_footer(text=f"{guild.name}")
-                dm_msg = await target.send(embed=dm_embed)
-                dm_id = str(dm_msg.id)
-            except discord.Forbidden:
-                pass
 
+        # Dashboard off 或警告自己 → 不寫 DB
         cfg = ensure_warn_settings(guild)
         if cfg["dashboard_enabled"] and target.id != invoker.id:
-            insert_warn(guild.id, target.id, invoker.id, warn_msg, dm_message_id=dm_id)
+            insert_warn(
+                guild.id, target.id, invoker.id, warn_msg, dm_message_id=dm_id
+            )
 
         return embed, None
+
     elif tool_name == "add_role":
         if not invoker.guild_permissions.administrator:
             return None, "❌ You don't have permission to manage roles."
@@ -6471,6 +6484,60 @@ async def on_message_delete(message):
         if not task.done():
             task.cancel()
             logger.info(f"⚡ 已成功發送取消訊號至訊息 ID {message.id} 的 AI 任務。")
+
+    # --- Warn DM reply → 轉發到伺服器 reply 頻道 ---
+    if isinstance(message.channel, discord.DMChannel) and not message.author.bot:
+        if message.reference and message.reference.message_id:
+            ref_id = str(message.reference.message_id)
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, guild_id, target_id, warner_id, reply_text "
+                "FROM warns WHERE dm_message_id = ? AND target_id = ?",
+                (ref_id, str(message.author.id)),
+            )
+            row = cursor.fetchone()
+            if row:
+                warn_id, gid, target_id, warner_id, old_reply = row
+                # 僅在仍允許 reply 且尚未回過（或允許覆蓋）時處理
+                cursor.execute(
+                    "SELECT reply_allowed, reply_channel_id, dashboard_enabled "
+                    "FROM warn_settings WHERE guild_id = ?",
+                    (gid,),
+                )
+                srow = cursor.fetchone()
+                conn.close()
+
+                if srow and int(srow[0] or 0) == 1 and srow[1]:
+                    # 更新 DB（dashboard off 時根本不會有這筆，通常進不來）
+                    now = discord.utils.utcnow().isoformat()
+                    conn = sqlite3.connect(DB_PATH)
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "UPDATE warns SET reply_text = ?, reply_at = ? WHERE id = ?",
+                        (message.content, now, warn_id),
+                    )
+                    conn.commit()
+                    conn.close()
+
+                    guild = bot.get_guild(int(gid))
+                    channel = bot.get_channel(int(srow[1]))
+                    if guild and channel:
+                        warner = guild.get_member(int(warner_id)) or bot.get_user(int(warner_id))
+                        receiver = message.author
+                        if warner is None:
+                            warner = discord.Object(id=int(warner_id))  # mention 仍可用 id
+                        try:
+                            await channel.send(
+                                view=build_warn_reply_channel_view(
+                                    warner, receiver, message.content
+                                )
+                            )
+                        except Exception as e:
+                            logger.error(f"[Warn reply forward]: {e}")
+                    return  # 私訊回覆不跑後面伺服器邏輯
+            else:
+                conn.close()
 
 @bot.event
 async def on_message(message: discord.Message):
