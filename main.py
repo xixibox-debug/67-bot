@@ -6482,23 +6482,27 @@ async def on_message_delete(message):
             task.cancel()
             logger.info(f"⚡ 已成功發送取消訊號至訊息 ID {message.id} 的 AI 任務。")
 
-    # --- Warn DM reply → 轉發到伺服器 reply 頻道 ---
-    if isinstance(message.channel, discord.DMChannel) and not message.author.bot:
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+
+    # --- Warn DM reply → 轉到 Reply 頻道，不進 67+AI ---
+    if isinstance(message.channel, discord.DMChannel):
         if message.reference and message.reference.message_id:
             ref_id = str(message.reference.message_id)
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id, guild_id, target_id, warner_id, reply_text "
+                "SELECT id, guild_id, target_id, warner_id "
                 "FROM warns WHERE dm_message_id = ? AND target_id = ?",
                 (ref_id, str(message.author.id)),
             )
             row = cursor.fetchone()
             if row:
-                warn_id, gid, target_id, warner_id, old_reply = row
-                # 僅在仍允許 reply 且尚未回過（或允許覆蓋）時處理
+                warn_id, gid, target_id, warner_id = row
                 cursor.execute(
-                    "SELECT reply_allowed, reply_channel_id, dashboard_enabled "
+                    "SELECT reply_allowed, reply_channel_id "
                     "FROM warn_settings WHERE guild_id = ?",
                     (gid,),
                 )
@@ -6506,40 +6510,38 @@ async def on_message_delete(message):
                 conn.close()
 
                 if srow and int(srow[0] or 0) == 1 and srow[1]:
-                    # 更新 DB（dashboard off 時根本不會有這筆，通常進不來）
                     now = discord.utils.utcnow().isoformat()
                     conn = sqlite3.connect(DB_PATH)
                     cursor = conn.cursor()
                     cursor.execute(
                         "UPDATE warns SET reply_text = ?, reply_at = ? WHERE id = ?",
-                        (message.content, now, warn_id),
+                        (message.content or "", now, warn_id),
                     )
                     conn.commit()
                     conn.close()
 
-                    guild = bot.get_guild(int(gid))
                     channel = bot.get_channel(int(srow[1]))
-                    if guild and channel:
-                        warner = guild.get_member(int(warner_id)) or bot.get_user(int(warner_id))
-                        receiver = message.author
-                        if warner is None:
-                            warner = discord.Object(id=int(warner_id))  # mention 仍可用 id
+                    if channel is None:
+                        try:
+                            channel = await bot.fetch_channel(int(srow[1]))
+                        except Exception:
+                            channel = None
+                    if channel:
                         try:
                             await channel.send(
                                 view=build_warn_reply_channel_view(
-                                    warner, receiver, message.content
+                                    int(warner_id),
+                                    message.author,
+                                    message.content or "",
                                 )
                             )
                         except Exception as e:
                             logger.error(f"[Warn reply forward]: {e}")
-                    return  # 私訊回覆不跑後面伺服器邏輯
+                return  # 不論有無頻道，只要是回覆 warn DM 就不要進 AI
             else:
                 conn.close()
+        # 一般私訊（沒回覆 warn）才可能往下進 AI
 
-@bot.event
-async def on_message(message: discord.Message):
-    if message.author.bot:
-        return
     # ----- Plane order prefix commands (m.) -----
     raw = (message.content or "").strip()
     if raw.lower().startswith("m."):
