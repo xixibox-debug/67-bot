@@ -6283,8 +6283,8 @@ async def on_message(message: discord.Message):
     # =================================================================
     # 🔢 數數頻道（...）
     # =================================================================
-        if is_feature_enabled(gid, "counting"):
-            cursor.execute("SELECT channel_id FROM counting_settings WHERE guild_id = ?", (gid,))
+    if is_feature_enabled(gid, "counting"):
+        cursor.execute("SELECT channel_id FROM counting_settings WHERE guild_id = ?", (gid,))
         c_row = cursor.fetchone()
         if c_row and c_row[0] and str(c_row[0]) == str(message.channel.id):
             content = message.content.strip()
