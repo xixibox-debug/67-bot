@@ -379,6 +379,25 @@ async def execute_agent_tool(tool_name: str, args: dict, invoker: discord.Member
                 f"Warn message:\n```\n{warn_msg}\n```"
             ),
         )
+            embed.set_footer(text=f"{guild.name}｜67")
+            return embed, None
+        except discord.Forbidden:
+            return None, "❌ Call any moderator to give me a higher privileges."
+
+    elif tool_name == "warn_member":
+        if not invoker.guild_permissions.moderate_members:
+            return None, "❌ You don't have permission to warn members."
+        warn_msg = (args.get("warn_message") or "").strip()
+        if not warn_msg:
+            return None, "❌ No warning message provided."
+        embed = discord.Embed(
+            title="⚠️ Warn",
+            color=0xff8500,
+            description=(
+                f"`{target.name}` got warned by `{invoker.name}`\n"
+                f"Warn message:\n```\n{warn_msg}\n```"
+            ),
+        )
         embed.set_footer(text=f"{guild.name}｜67")
         dm_id = None
         try:
@@ -830,7 +849,7 @@ def init_db():
         )
     """)
 
-        cursor.execute("""
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS warn_settings (
             guild_id TEXT PRIMARY KEY,
             dashboard_enabled INTEGER DEFAULT 1,
