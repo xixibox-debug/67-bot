@@ -3290,14 +3290,14 @@ class WarnSettingsHomeView(ui.LayoutView):
         self.add_item(
             ui.Container(
                 ui.TextDisplay("# 67 Settings"),
-                ui.Separator(),
+                ui.Separator(spacing=discord.SeparatorSpacing.large),  # 粗
                 ui.TextDisplay(f"**{WARN_EMOJI} Warn**"),
                 ui.TextDisplay(f"Warn Dashboard status: `{status}`"),
                 ui.ActionRow(toggle_btn),
                 ui.TextDisplay(body),
-                ui.Separator(),
+                ui.Separator(),  # 細
                 ui.ActionRow(select),
-                accent_color=0x2B2D31,
+                # 不要 accent_color
             )
         )
         self.add_item(ui.ActionRow(back_btn))
@@ -3349,12 +3349,12 @@ class WarnHistoryView(ui.LayoutView):
         self.add_item(
             ui.Container(
                 ui.TextDisplay("# 67 Settings"),
-                ui.Separator(),
+                ui.Separator(spacing=discord.SeparatorSpacing.large),  # 粗
                 ui.TextDisplay(f"**{WARN_EMOJI} Warn**{GO_EMOJI}Warn History"),
                 ui.TextDisplay(f"Latest 10 Warn History:\n```\n{hist}\n```"),
+                ui.Separator(),  # 細（按鈕列前）
                 ui.ActionRow(search_r, search_w),
-                accent_color=0x2B2D31,
-            )
+                # 不要 accent_color
         )
         self.add_item(ui.ActionRow(back_btn))
 
@@ -3450,13 +3450,14 @@ class WarnUserHistoryView(ui.LayoutView):
 
         container_children = [
             ui.TextDisplay("# 67 Settings"),
-            ui.Separator(),
+            ui.Separator(spacing=discord.SeparatorSpacing.large),  # 粗
             ui.TextDisplay(f"**{WARN_EMOJI} Warn**{GO_EMOJI}Warn History{GO_EMOJI}{title_tail}"),
             ui.TextDisplay(f"User : `{uname}`, total `{total}` times."),
             *detail_items,
+            ui.Separator(),  # 細（分頁按鈕前）
             ui.ActionRow(prev_btn, mid_btn, next_btn),
         ]
-        self.add_item(ui.Container(*container_children, accent_color=0x2B2D31))
+        self.add_item(ui.Container(*container_children))  # 不要 accent_color
         self.add_item(ui.ActionRow(back_btn))
 
 
@@ -4248,12 +4249,14 @@ class SettingsLayoutView(ui.LayoutView):
         self.add_item(
             ui.Container(
                 ui.TextDisplay("# 67 Settings"),
+                ui.Separator(spacing=discord.SeparatorSpacing.large),  # 粗分隔
                 ui.TextDisplay(body_server),
                 ui.TextDisplay(body_activity),
                 ui.TextDisplay(body_ent),
                 ui.TextDisplay(body_mod),
+                ui.Separator(),  # 細分隔（預設 small）
                 ui.ActionRow(SettingsSelect(guild_id)),
-                accent_color=0x2B2D31,
+                # 不要 accent_color → 左邊不會有色條
             )
         )
 
