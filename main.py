@@ -358,31 +358,37 @@ async def execute_agent_tool(tool_name: str, args: dict, invoker: discord.Member
                 color=0xe74c3c,
                 description=parse_placeholders("Reason: {reason}", target, guild, extra={"reason": reason})
             )
-            embed.set_footer(text=f"{guild.name}｜67")
-            return embed, None
-        except discord.Forbidden:
-            return None, "❌ Call any moderator to give me a higher privileges."
+                    embed.set_footer(text=f"{guild.name}｜67")
 
-    elif tool_name == "warn_member":
-        if not invoker.guild_permissions.moderate_members:
-            return None, "❌ You don't have permission to warn members."
-        warn_msg = (args.get("warn_message") or "").strip()
-        if not warn_msg:
-            return None, "❌ No warning message provided."
-        embed = discord.Embed(
-            title="⚠️ Warn",
-            color=0xff8500,
-            description=f"`{target.name}` got warned by `{invoker.name}`\nWarn message:\n```\n{warn_msg}\n```"
-        )
-        embed.set_footer(text=f"{guild.name}｜67")
+        dm_id = None
         try:
-            await target.send(
+            dm_msg = await target.send(
                 view=build_warn_dm_view(guild.name, invoker, warn_msg)
             )
+            dm_id = str(dm_msg.id)
         except discord.Forbidden:
             pass
-        return embed, None
+        except NameError:
+            try:
+                dm_embed = discord.Embed(
+                    title="⚠️ Warn",
+                    color=0xff8500,
+                    description=(
+                        f"You have received a warn from {guild.name} by {invoker.name}\n"
+                        f"Warn message:\n```\n{warn_msg}\n```"
+                    ),
+                )
+                dm_embed.set_footer(text=f"{guild.name}")
+                dm_msg = await target.send(embed=dm_embed)
+                dm_id = str(dm_msg.id)
+            except discord.Forbidden:
+                pass
 
+        cfg = ensure_warn_settings(guild)
+        if cfg["dashboard_enabled"] and target.id != invoker.id:
+            insert_warn(guild.id, target.id, invoker.id, warn_msg, dm_message_id=dm_id)
+
+        return embed, None
     elif tool_name == "add_role":
         if not invoker.guild_permissions.administrator:
             return None, "❌ You don't have permission to manage roles."
@@ -817,6 +823,34 @@ def init_db():
             created_at TEXT
         )
     """)
+
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS warn_settings (
+            guild_id TEXT PRIMARY KEY,
+            dashboard_enabled INTEGER DEFAULT 1,
+            reply_allowed INTEGER DEFAULT 1,
+            reply_channel_id TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS warns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            warner_id TEXT NOT NULL,
+            message TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            dm_message_id TEXT,
+            reply_text TEXT,
+            reply_at TEXT
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_warns_guild_time ON warns(guild_id, created_at DESC)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_warns_target ON warns(guild_id, target_id)"
+    )
     
     conn.commit()
     conn.close()
@@ -1285,6 +1319,164 @@ def set_feature_enabled(guild_id, feature: str, enabled: bool):
     )
     conn.commit(); conn.close()
 
+
+
+def _default_reply_channel_id(guild: discord.Guild) -> str | None:
+    # Community「Server Updates / Public Updates」，否則 system channel
+    ch = getattr(guild, "public_updates_channel", None) or guild.system_channel
+    return str(ch.id) if ch else None
+
+
+def ensure_warn_settings(guild: discord.Guild) -> dict:
+    gid = str(guild.id)
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT dashboard_enabled, reply_allowed, reply_channel_id FROM warn_settings WHERE guild_id = ?",
+        (gid,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        default_ch = _default_reply_channel_id(guild)
+        cursor.execute(
+            "INSERT INTO warn_settings (guild_id, dashboard_enabled, reply_allowed, reply_channel_id) VALUES (?, 1, 1, ?)",
+            (gid, default_ch),
+        )
+        conn.commit()
+        conn.close()
+        return {
+            "dashboard_enabled": 1,
+            "reply_allowed": 1,
+            "reply_channel_id": default_ch,
+        }
+    dashboard, reply_allowed, reply_ch = row
+    if not reply_ch:
+        reply_ch = _default_reply_channel_id(guild)
+        if reply_ch:
+            cursor.execute(
+                "UPDATE warn_settings SET reply_channel_id = ? WHERE guild_id = ?",
+                (reply_ch, gid),
+            )
+            conn.commit()
+    conn.close()
+    return {
+        "dashboard_enabled": int(dashboard if dashboard is not None else 1),
+        "reply_allowed": int(reply_allowed if reply_allowed is not None else 1),
+        "reply_channel_id": reply_ch,
+    }
+
+
+def set_warn_dashboard(guild_id, enabled: bool):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO warn_settings (guild_id, dashboard_enabled) VALUES (?, ?) "
+        "ON CONFLICT(guild_id) DO UPDATE SET dashboard_enabled = excluded.dashboard_enabled",
+        (str(guild_id), 1 if enabled else 0),
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_warn_reply_allowed(guild_id, allowed: bool):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO warn_settings (guild_id, reply_allowed) VALUES (?, ?) "
+        "ON CONFLICT(guild_id) DO UPDATE SET reply_allowed = excluded.reply_allowed",
+        (str(guild_id), 1 if allowed else 0),
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_warn_reply_channel(guild_id, channel_id: str | None):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO warn_settings (guild_id, reply_channel_id) VALUES (?, ?) "
+        "ON CONFLICT(guild_id) DO UPDATE SET reply_channel_id = excluded.reply_channel_id",
+        (str(guild_id), channel_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def insert_warn(
+    guild_id,
+    target_id,
+    warner_id,
+    message: str,
+    dm_message_id: str | None = None,
+) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    now = discord.utils.utcnow().isoformat()
+    cursor.execute(
+        "INSERT INTO warns (guild_id, target_id, warner_id, message, created_at, dm_message_id) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (str(guild_id), str(target_id), str(warner_id), message, now, dm_message_id),
+    )
+    wid = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return wid
+
+
+def get_warn_stats(guild: discord.Guild) -> dict:
+    gid = str(guild.id)
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM warns WHERE guild_id = ?", (gid,))
+    total = cursor.fetchone()[0] or 0
+    cursor.execute(
+        "SELECT target_id, COUNT(*) AS c FROM warns WHERE guild_id = ? "
+        "GROUP BY target_id ORDER BY c DESC LIMIT 1",
+        (gid,),
+    )
+    top = cursor.fetchone()
+    cursor.execute(
+        "SELECT target_id, warner_id FROM warns WHERE guild_id = ? ORDER BY id DESC LIMIT 1",
+        (gid,),
+    )
+    latest = cursor.fetchone()
+    conn.close()
+
+    def uname(uid):
+        if not uid:
+            return "—"
+        m = guild.get_member(int(uid))
+        if m:
+            return m.name
+        u = bot.get_user(int(uid))
+        return u.name if u else str(uid)
+
+    return {
+        "total": total,
+        "highest_name": uname(top[0]) if top else "—",
+        "highest_count": top[1] if top else 0,
+        "latest_from": uname(latest[1]) if latest else "—",
+        "latest_to": uname(latest[0]) if latest else "—",
+    }
+
+
+def list_warns(guild_id, limit=10, target_id=None, warner_id=None):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    q = "SELECT id, target_id, warner_id, message, created_at, reply_text, reply_at FROM warns WHERE guild_id = ?"
+    args = [str(guild_id)]
+    if target_id:
+        q += " AND target_id = ?"
+        args.append(str(target_id))
+    if warner_id:
+        q += " AND warner_id = ?"
+        args.append(str(warner_id))
+    q += " ORDER BY id DESC LIMIT ?"
+    args.append(limit)
+    cursor.execute(q, args)
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
 
 def is_autoreply_enabled(guild_id) -> bool:
     """67 自動回覆，跟其他功能相反，預設是開啟的"""
@@ -3003,6 +3195,359 @@ def build_warn_dm_view(
     )
     return view
 
+WARN_EMOJI = "<:warn_grey:1547901810415505419>"
+GO_EMOJI = "<:go:1549253771576746044>"
+BACK_EMOJI = discord.PartialEmoji(name="back", id=1548293130347085864)
+SWITCH_EMOJI = discord.PartialEmoji(name="switch", id=1549251939961937980)
+
+
+class WarnSettingsHomeView(ui.LayoutView):
+    def __init__(self, guild: discord.Guild):
+        super().__init__(timeout=None)
+        self.guild_id = guild.id
+        cfg = ensure_warn_settings(guild)
+        stats = get_warn_stats(guild)
+        status = "on" if cfg["dashboard_enabled"] else "off"
+        reply = "allowed" if cfg["reply_allowed"] else "denied"
+        ch_id = cfg["reply_channel_id"]
+        ch_txt = f"<#{ch_id}>" if ch_id else "`(not set)`"
+
+        body = (
+            f"Warn reply: `{reply}`\n"
+            f"Reply sent to: {ch_txt}\n"
+            f"Total warn on this server: `{stats['total']}`\n"
+            f"Highest warn record: `{stats['highest_name']}`"
+            + (f" (`{stats['highest_count']}`)" if stats["total"] else "")
+            + f"\nLatest Warn: from `{stats['latest_from']}` to `{stats['latest_to']}`"
+        )
+
+        select = ui.Select(
+            placeholder="Choose a setting for more information",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(label="Warn History", value="history"),
+                discord.SelectOption(label="Replyable (on/off)", value="reply_toggle"),
+                discord.SelectOption(label="Reply Channel", value="reply_channel"),
+            ],
+        )
+
+        async def on_select(interaction: discord.Interaction):
+            v = select.values[0]
+            if v == "history":
+                return await interaction.response.edit_message(
+                    view=WarnHistoryView(interaction.guild)
+                )
+            if v == "reply_toggle":
+                cfg2 = ensure_warn_settings(interaction.guild)
+                set_warn_reply_allowed(self.guild_id, not bool(cfg2["reply_allowed"]))
+                return await interaction.response.edit_message(
+                    view=WarnSettingsHomeView(interaction.guild)
+                )
+            if v == "reply_channel":
+                return await interaction.response.send_message(
+                    "Select a channel for warn replies:",
+                    view=WarnReplyChannelPickView(self.guild_id),
+                    ephemeral=True,
+                )
+
+        select.callback = on_select
+
+        toggle_btn = ui.Button(
+            style=discord.ButtonStyle.primary,
+            label="On/Off",
+            emoji=SWITCH_EMOJI,
+        )
+
+        async def on_toggle(interaction: discord.Interaction):
+            cfg2 = ensure_warn_settings(interaction.guild)
+            set_warn_dashboard(self.guild_id, not bool(cfg2["dashboard_enabled"]))
+            await interaction.response.edit_message(
+                view=WarnSettingsHomeView(interaction.guild)
+            )
+
+        toggle_btn.callback = on_toggle
+
+        back_btn = ui.Button(
+            style=discord.ButtonStyle.secondary,
+            label="Back",
+            emoji=BACK_EMOJI,
+        )
+
+        async def on_back(interaction: discord.Interaction):
+            await interaction.response.edit_message(
+                view=SettingsLayoutView(self.guild_id)
+            )
+
+        back_btn.callback = on_back
+
+        self.add_item(
+            ui.Container(
+                ui.TextDisplay("# 67 Settings"),
+                ui.Separator(),
+                ui.TextDisplay(f"**{WARN_EMOJI} Warn**"),
+                ui.TextDisplay(f"Warn Dashboard status: `{status}`"),
+                ui.ActionRow(toggle_btn),
+                ui.TextDisplay(body),
+                ui.Separator(),
+                ui.ActionRow(select),
+                accent_color=0x2B2D31,
+            )
+        )
+        self.add_item(ui.ActionRow(back_btn))
+
+
+class WarnHistoryView(ui.LayoutView):
+    def __init__(self, guild: discord.Guild):
+        super().__init__(timeout=None)
+        self.guild_id = guild.id
+        rows = list_warns(guild.id, limit=10)
+        lines = []
+        for i, (wid, tid, wid_from, msg, created, *_rest) in enumerate(rows, 1):
+            t = guild.get_member(int(tid)) or bot.get_user(int(tid))
+            w = guild.get_member(int(wid_from)) or bot.get_user(int(wid_from))
+            tn = t.name if t else tid
+            wn = w.name if w else wid_from
+            lines.append(f"{i}. {tn} from {wn}")
+        hist = "\n".join(lines) if lines else "(no warns yet)"
+
+        search_r = ui.Button(style=discord.ButtonStyle.secondary, label="Search by Receiver")
+        search_w = ui.Button(style=discord.ButtonStyle.secondary, label="Search by Warner")
+        back_btn = ui.Button(
+            style=discord.ButtonStyle.secondary, label="Back", emoji=BACK_EMOJI
+        )
+
+        async def on_search_r(interaction: discord.Interaction):
+            await interaction.response.send_message(
+                "Pick a member (receiver):",
+                view=WarnUserPickView(guild.id, mode="receiver"),
+                ephemeral=True,
+            )
+
+        async def on_search_w(interaction: discord.Interaction):
+            await interaction.response.send_message(
+                "Pick a member (warner):",
+                view=WarnUserPickView(guild.id, mode="warner"),
+                ephemeral=True,
+            )
+
+        async def on_back(interaction: discord.Interaction):
+            await interaction.response.edit_message(
+                view=WarnSettingsHomeView(interaction.guild)
+            )
+
+        search_r.callback = on_search_r
+        search_w.callback = on_search_w
+        back_btn.callback = on_back
+
+        self.add_item(
+            ui.Container(
+                ui.TextDisplay("# 67 Settings"),
+                ui.Separator(),
+                ui.TextDisplay(f"**{WARN_EMOJI} Warn**{GO_EMOJI}Warn History"),
+                ui.TextDisplay(f"Latest 10 Warn History:\n```\n{hist}\n```"),
+                ui.ActionRow(search_r, search_w),
+                accent_color=0x2B2D31,
+            )
+        )
+        self.add_item(ui.ActionRow(back_btn))
+
+
+class WarnUserHistoryView(ui.LayoutView):
+    """mode: receiver | warner；index 從 0 開始分頁（一頁一筆）。"""
+
+    def __init__(self, guild: discord.Guild, user_id: int, mode: str = "receiver", index: int = 0):
+        super().__init__(timeout=None)
+        self.guild_id = guild.id
+        self.user_id = user_id
+        self.mode = mode
+        self.index = index
+
+        if mode == "receiver":
+            rows = list_warns(guild.id, limit=50, target_id=user_id)
+            title_tail = "Receiver's History"
+        else:
+            rows = list_warns(guild.id, limit=50, warner_id=user_id)
+            title_tail = "Warner's History"
+
+        user = guild.get_member(user_id) or bot.get_user(user_id)
+        uname = user.name if user else str(user_id)
+        total = len(rows)
+        if not rows:
+            detail_items = [ui.TextDisplay("No records.")]
+            idx = 0
+        else:
+            idx = max(0, min(index, total - 1))
+            wid, tid, wid_from, msg, created, reply_text, reply_at = rows[idx]
+            warner = guild.get_member(int(wid_from)) or bot.get_user(int(wid_from))
+            wn = warner.name if warner else wid_from
+            quoted = "\n".join(f"> {ln}" if ln else ">" for ln in (msg or "").splitlines())
+            detail_items = [
+                ui.TextDisplay(f"{idx + 1}. From: `{wn}` in <t:{int(discord.utils.parse_time(created).timestamp()) if False else 0}:f>"),
+            ]
+            # created_at 是 isoformat；安全顯示
+            try:
+                ts = int(datetime.datetime.fromisoformat(created).timestamp())
+                time_line = f"{idx + 1}. From: `{wn}` in <t:{ts}:f>"
+            except Exception:
+                time_line = f"{idx + 1}. From: `{wn}` in `{created}`"
+            detail_items = [
+                ui.TextDisplay(time_line),
+                ui.TextDisplay(quoted or "> —"),
+            ]
+            if reply_text:
+                try:
+                    rts = int(datetime.datetime.fromisoformat(reply_at).timestamp())
+                    detail_items.append(ui.TextDisplay(f"Replied in <t:{rts}:f>:"))
+                except Exception:
+                    detail_items.append(ui.TextDisplay("Replied:"))
+                rq = "\n".join(f"> {ln}" if ln else ">" for ln in reply_text.splitlines())
+                detail_items.append(ui.TextDisplay(rq))
+
+        prev_btn = ui.Button(
+            style=discord.ButtonStyle.secondary,
+            emoji=BACK_EMOJI,
+            disabled=(index <= 0 or total == 0),
+        )
+        mid_btn = ui.Button(
+            style=discord.ButtonStyle.primary,
+            emoji=discord.PartialEmoji(name="Switch1", id=1549256081669230624),
+            disabled=True,  # 預留；可之後改成跳到指定筆
+        )
+        next_btn = ui.Button(
+            style=discord.ButtonStyle.secondary,
+            emoji=discord.PartialEmoji(name="go", id=1549253771576746044),
+            disabled=(index >= total - 1 or total == 0),
+        )
+        back_btn = ui.Button(
+            style=discord.ButtonStyle.secondary, label="Back", emoji=BACK_EMOJI
+        )
+
+        async def on_prev(interaction: discord.Interaction):
+            await interaction.response.edit_message(
+                view=WarnUserHistoryView(guild, user_id, mode, index - 1)
+            )
+
+        async def on_next(interaction: discord.Interaction):
+            await interaction.response.edit_message(
+                view=WarnUserHistoryView(guild, user_id, mode, index + 1)
+            )
+
+        async def on_back(interaction: discord.Interaction):
+            await interaction.response.edit_message(
+                view=WarnHistoryView(interaction.guild)
+            )
+
+        prev_btn.callback = on_prev
+        next_btn.callback = on_next
+        back_btn.callback = on_back
+
+        container_children = [
+            ui.TextDisplay("# 67 Settings"),
+            ui.Separator(),
+            ui.TextDisplay(f"**{WARN_EMOJI} Warn**{GO_EMOJI}Warn History{GO_EMOJI}{title_tail}"),
+            ui.TextDisplay(f"User : `{uname}`, total `{total}` times."),
+            *detail_items,
+            ui.ActionRow(prev_btn, mid_btn, next_btn),
+        ]
+        self.add_item(ui.Container(*container_children, accent_color=0x2B2D31))
+        self.add_item(ui.ActionRow(back_btn))
+
+
+class WarnUserPickView(ui.View):
+    def __init__(self, guild_id: int, mode: str):
+        super().__init__(timeout=120)
+        self.guild_id = guild_id
+        self.mode = mode
+        sel = ui.UserSelect(placeholder="Select member", min_values=1, max_values=1)
+
+        async def on_pick(interaction: discord.Interaction):
+            user = sel.values[0]
+            await interaction.response.edit_message(
+                content=None,
+                view=WarnUserHistoryView(interaction.guild, user.id, mode=self.mode, index=0),
+            )
+
+        sel.callback = on_pick
+        self.add_item(sel)
+
+
+class WarnReplyChannelPickView(ui.View):
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=120)
+        self.guild_id = guild_id
+        sel = ui.ChannelSelect(
+            channel_types=[discord.ChannelType.text],
+            placeholder="Reply channel",
+            min_values=1,
+            max_values=1,
+        )
+
+        async def on_pick(interaction: discord.Interaction):
+            ch = sel.values[0]
+            set_warn_reply_channel(self.guild_id, str(ch.id))
+            await interaction.response.edit_message(
+                content=f"✅ Reply channel → {ch.mention}",
+                view=None,
+            )
+
+        sel.callback = on_pick
+        self.add_item(sel)
+
+def build_warn_dm_view(
+    guild_name: str,
+    warner: discord.abc.User,
+    warn_msg: str,
+) -> ui.LayoutView:
+    quoted = "\n".join(
+        f"> {line}" if line else ">"
+        for line in (warn_msg or "").splitlines()
+    ) or "> (no message)"
+    view = ui.LayoutView(timeout=None)
+    view.add_item(
+        ui.Container(
+            ui.TextDisplay("<:warn_yellow:1549249358006976613> **Warn**"),
+            ui.Separator(),
+            ui.TextDisplay(
+                f"You have received a warn from `{guild_name}` by {warner.mention}."
+            ),
+            ui.TextDisplay("Warn message:"),
+            ui.TextDisplay(quoted),
+            ui.Separator(),
+            ui.TextDisplay("To reply this run, just reply this message directly."),
+            accent_color=0xFFFD00,
+        )
+    )
+    return view
+
+
+def build_warn_reply_channel_view(
+    warner_id: int,
+    receiver: discord.abc.User,
+    reply_text: str,
+) -> ui.LayoutView:
+    quoted = "\n".join(
+        f"> {line}" if line else ">"
+        for line in (reply_text or "").splitlines()
+    ) or "> (empty)"
+    view = ui.LayoutView(timeout=None)
+    view.add_item(
+        ui.Container(
+            ui.TextDisplay("<:warn_yellow:1549249358006976613> **Warn Reply**"),
+            ui.Separator(),
+            ui.TextDisplay(
+                f"<@{warner_id}>, {receiver.mention} replied your warn."
+            ),
+            ui.TextDisplay("Reply message:"),
+            ui.TextDisplay(quoted),
+            ui.Separator(),
+            ui.TextDisplay("To reply this message, run `/warn` again."),
+            accent_color=0xFFFD00,
+        )
+    )
+    return view
+
+
 class WarnModal(ui.Modal, title="Send a Warning"):
     reason = ui.TextInput(label="Warning message", style=discord.TextStyle.long, required=True, max_length=1000)
 
@@ -3020,18 +3565,27 @@ class WarnModal(ui.Modal, title="Send a Warning"):
             )
         )
         channel_embed.set_footer(text=f"{interaction.guild.name}｜67")
+        channel_embed.set_footer(text=f"{interaction.guild.name}｜67")
         await interaction.response.send_message(embed=channel_embed)
 
+        warn_msg = self.reason.value
+        invoker = interaction.user
+        target = self.target
+        guild = interaction.guild
+
+        dm_id = None
         try:
-            await self.target.send(
-                view=build_warn_dm_view(
-                    interaction.guild.name,
-                    interaction.user,
-                    self.reason.value,
-                )
+            dm_msg = await target.send(
+                view=build_warn_dm_view(guild.name, invoker, warn_msg)
             )
+            dm_id = str(dm_msg.id)
         except discord.Forbidden:
-            pass  # 對方關私訊，頻道那則仍已送出
+            pass
+
+        # Dashboard off 或警告自己 → 不記錄、不算次數
+        cfg = ensure_warn_settings(guild)
+        if cfg["dashboard_enabled"] and target.id != invoker.id:
+            insert_warn(guild.id, target.id, invoker.id, warn_msg, dm_message_id=dm_id)
 
 
 @bot.tree.command(name="warn", description="Warn a member (and sent via DM)")
@@ -3526,7 +4080,11 @@ class SettingsSelect(ui.Select):
                 value="timemsg",
                 emoji="<:time_message_grey:1547899595390984212>",
             ),
-            # Warn intentionally omitted from select (coming soon)
+            discord.SelectOption(
+                label="Warn",
+                value="warn",
+                emoji="<:warn_grey:1547901810415505419>",
+            ),
         ]
         super().__init__(
             placeholder="Choose a setting for more information",
@@ -3632,6 +4190,12 @@ class SettingsSelect(ui.Select):
                     ephemeral=True,
                 )
 
+            if key == "warn":
+                # 與主畫面同為 V2 LayoutView → 用 edit_message，不要帶 embed
+                return await interaction.response.edit_message(
+                    view=WarnSettingsHomeView(interaction.guild)
+                )
+
             await interaction.response.send_message(
                 "❌ Unknown setting.",
                 ephemeral=True,
@@ -3672,7 +4236,7 @@ class SettingsLayoutView(ui.LayoutView):
             "- <:mute_grey:1547899593167994990> Auto Mute\n"
             "- <:emoji_grey:1547899600914874379> Auto Reaction\n"
             "- <:time_message_grey:1547899595390984212> Time Message\n"
-            "- <:warn_grey:1547901810415505419> Warn *(coming soon)*"
+            "- <:warn_grey:1547901810415505419> Warn"
         )
 
         self.add_item(
