@@ -448,6 +448,9 @@ async def execute_agent_tool(tool_name: str, args: dict, invoker: discord.Member
         current_67 = row[0] if row else 0
         cursor.execute("INSERT OR REPLACE INTO levels (guild_id, user_id, xp, level, count_67) VALUES (?, ?, ?, ?, ?)", (str(guild.id), str(target.id), 0, int(level), current_67))
         conn.commit(); conn.close()
+                # 在 commit 之後
+        if isinstance(target, discord.Member):
+            await check_level_roles(target, int(level), from_level=None)
         embed = discord.Embed(title=f"🔥 Set {target.name}'s level to {int(level)}", color=0x2ecc71)
         embed.set_footer(text=f"{guild.name}｜67")
         return embed, None
@@ -1217,21 +1220,59 @@ def get_admin_xp_per_level(guild_id) -> int:
     row = cursor.fetchone(); conn.close()
     return row[0] if row and row[0] else 500
 
-async def check_level_roles(member: discord.Member, level: int):
-    """檢查並發放該等級對應的身分組獎勵"""
-    conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
-    cursor.execute("SELECT role_id FROM level_roles WHERE guild_id = ? AND level = ?", (str(member.guild.id), level))
-    row = cursor.fetchone()
-    conn.close()
-    
-    if row:
-        role = member.guild.get_role(int(row[0]))
-        if role and role not in member.roles:
-            try:
-                await member.add_roles(role)
-            except discord.Forbidden:
-                logger.error(f"nah, I can't give **{role.name}** to **{member.name}**")
+async def check_level_roles(
+    member: discord.Member,
+    level: int,
+    from_level: int | None = None,
+):
+    """
+    發放等級身分組。
+    - from_level 有給：只補 (from_level, level] 之間設定過的角色（一般升等）
+    - from_level 為 None：補所有 level <= 目前等級的角色（/setlevel、Agent 灌等）
+    """
+    if not isinstance(member, discord.Member):
+        return
 
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    gid = str(member.guild.id)
+
+    if from_level is None:
+        cursor.execute(
+            "SELECT role_id FROM level_roles WHERE guild_id = ? AND level <= ? ORDER BY level ASC",
+            (gid, level),
+        )
+    else:
+        cursor.execute(
+            "SELECT role_id FROM level_roles WHERE guild_id = ? AND level > ? AND level <= ? ORDER BY level ASC",
+            (gid, from_level, level),
+        )
+    rows = cursor.fetchall()
+    conn.close()
+
+    to_add = []
+    for (role_id,) in rows:
+        role = member.guild.get_role(int(role_id))
+        if role and role not in member.roles:
+            to_add.append(role)
+
+    if not to_add:
+        return
+
+    try:
+        await member.add_roles(*to_add, reason="Level role reward")
+    except discord.Forbidden:
+        for role in to_add:
+            try:
+                await member.add_roles(role, reason="Level role reward")
+            except discord.Forbidden:
+                logger.error(
+                    f"❌ nah, I can't give **{role.name}** to **{member.name}**"
+                )
+            except Exception as e:
+                logger.error(f"[check_level_roles] {e}")
+    except Exception as e:
+        logger.error(f"[check_level_roles bulk] {e}")
 
 def is_feature_enabled(guild_id, feature: str) -> bool:
     conn = sqlite3.connect(DB_PATH); cursor = conn.cursor()
@@ -3995,7 +4036,8 @@ async def setlevel(interaction: discord.Interaction, user: discord.Member, level
     # 回應操作的管理員（僅限管理員看見）
     await interaction.response.send_message(f"✅ Set {user.name}'s level to Lv. {level}.", ephemeral=True)
     # 🎯 新增：手動調等後，自動補上對應等級的身分組獎勵
-    await check_level_roles(user, level)
+    # 灌到目標等：補齊所有 <= 該等的獎勵身分組
+    await check_level_roles(user, level, from_level=None)
     
     # 🎯 核心修正：直接抓取與一般升等完全相同的頻道與訊息設定
     cursor.execute("SELECT channel_id, message FROM levelup WHERE guild_id = ?", (str(interaction.guild.id),))
@@ -6245,10 +6287,21 @@ async def on_message(message: discord.Message):
         cursor.execute("SELECT channel_id FROM counting_settings WHERE guild_id = ?", (gid,))
         c_row = cursor.fetchone()
         if c_row and c_row[0] and str(c_row[0]) == str(message.channel.id):
-            content = message.content.strip()
-            is_admin = message.author.guild_permissions.administrator if isinstance(message.author, discord.Member) else False
+        content = message.content.strip()
+                is_admin = message.author.guild_permissions.administrator if isinstance(message.author, discord.Member) else False
 
-            if not content.isdigit():
+            # 允許整數（含負數）："12"、"-3"；不接受 "+1"、小數、其他文字
+            def _parse_count_int(s: str):
+                if not s:
+                    return None
+                if s.isdigit():
+                    return int(s)
+                if s[0] == "-" and len(s) > 1 and s[1:].isdigit():
+                    return int(s)
+                return None
+
+            number = _parse_count_int(content)
+            if number is None:
                 # 🎯 非數字：管理員可以正常發，其他人一律刪除、不影響計數
                 if not is_admin:
                     try:
@@ -6268,14 +6321,25 @@ async def on_message(message: discord.Message):
                 s_row = cursor.fetchone()
                 current_count, last_user_id, mute_dur = s_row if s_row else (0, None, "10m")
 
-                number = int(content)
-                expected = current_count + 1
+                # number 已在鎖外解析；進鎖後用最新 current_count 算期望值
+                if current_count == 0:
+                    # 從 0 出發：1 或 -1 都對，決定之後往正或往負
+                    valid = number in (1, -1)
+                    expected_hint = "1 or -1"
+                elif current_count > 0:
+                    valid = number == current_count + 1
+                    expected_hint = str(current_count + 1)
+                else:
+                    # current_count < 0
+                    valid = number == current_count - 1
+                    expected_hint = str(current_count - 1)
 
-                if number == expected and str(message.author.id) != str(last_user_id):
-                    # ✅ 數對了，而且不是同一個人連續兩次數
+                same_user = last_user_id is not None and str(message.author.id) == str(last_user_id)
+
+                if valid and not same_user:
                     cursor.execute(
                         "UPDATE counting_settings SET current_count = ?, last_user_id = ? WHERE guild_id = ?",
-                        (number, str(message.author.id), gid)
+                        (number, str(message.author.id), gid),
                     )
                     conn.commit()
                     try:
@@ -6283,11 +6347,13 @@ async def on_message(message: discord.Message):
                     except discord.Forbidden:
                         pass
                 else:
-                    # ❌ 數錯了，或同一個人連續兩次數：重置 + （視設定）禁言
-                    reason = "connected two numbers in a row" if str(message.author.id) == str(last_user_id) and number == expected else f"wrong number (expected {expected})"
+                    if same_user and valid:
+                        reason = "connected two numbers in a row"
+                    else:
+                        reason = f"wrong number (expected {expected_hint})"
                     cursor.execute(
                         "UPDATE counting_settings SET current_count = 0, last_user_id = NULL WHERE guild_id = ?",
-                        (gid,)
+                        (gid,),
                     )
                     conn.commit()
 
@@ -6297,14 +6363,24 @@ async def on_message(message: discord.Message):
                         pass
 
                     delta, _ = parse_mute_duration(mute_dur or "10m")
-                    if delta:  # 🎯 delta 是 None 代表設定成 0/none，不禁言
+                    if delta:
                         try:
-                            await message.author.timeout(delta, reason=f"Broke the counting channel: {reason}")
+                            await message.author.timeout(
+                                delta,
+                                reason=f"Broke the counting channel: {reason}",
+                            )
                         except discord.Forbidden:
-                            logger.error(f"[Counting] 沒有權限禁言 {message.author} in {message.guild.name}")
+                            logger.error(
+                                f"[Counting] 沒有權限禁言 {message.author} in {message.guild.name}"
+                            )
 
                     try:
-                        await message.channel.send(f"💥 {message.author.mention} broke the count at **{number}** ({reason})! Count reset to **0**, starting from **1**.")
+                        await message.channel.send(
+                            f"💥 {message.author.mention} broke the count at **{number}** ({reason})! "
+                            f"Count reset to **0**. Next: **1** or **-1**."
+                        )
+                    except Exception as e:
+                        logger.error(f"[Counting 重置訊息發送失敗]: {e}")
                     except Exception as e:
                         logger.error(f"[Counting 重置訊息發送失敗]: {e}")
 
@@ -6349,8 +6425,7 @@ async def on_message(message: discord.Message):
         conn.commit()
 
         if new_lvl > lvl:
-            for l in range(lvl + 1, new_lvl + 1):
-                await check_level_roles(message.author, l)
+            await check_level_roles(message.author, new_lvl, from_level=lvl)
                 
             cursor.execute("SELECT channel_id, message, reply_mode FROM levelup WHERE guild_id = ?", (gid,))
             lvl_row = cursor.fetchone()
