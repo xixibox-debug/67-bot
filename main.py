@@ -6281,10 +6281,10 @@ async def on_message(message: discord.Message):
     uid = str(message.author.id)
 
     # =================================================================
-    # 🔢 數數頻道（獨立處理，命中這個頻道就不繼續往下跑 67 統計/等級/Streaks，直接 return）
+    # 🔢 數數頻道（...）
     # =================================================================
         if is_feature_enabled(gid, "counting"):
-        cursor.execute("SELECT channel_id FROM counting_settings WHERE guild_id = ?", (gid,))
+            cursor.execute("SELECT channel_id FROM counting_settings WHERE guild_id = ?", (gid,))
         c_row = cursor.fetchone()
         if c_row and c_row[0] and str(c_row[0]) == str(message.channel.id):
             content = message.content.strip()
