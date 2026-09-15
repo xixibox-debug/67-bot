@@ -448,7 +448,7 @@ async def execute_agent_tool(tool_name: str, args: dict, invoker: discord.Member
         current_67 = row[0] if row else 0
         cursor.execute("INSERT OR REPLACE INTO levels (guild_id, user_id, xp, level, count_67) VALUES (?, ?, ?, ?, ?)", (str(guild.id), str(target.id), 0, int(level), current_67))
         conn.commit(); conn.close()
-                # 在 commit 之後
+        # 在 commit 之後
         if isinstance(target, discord.Member):
             await check_level_roles(target, int(level), from_level=None)
         embed = discord.Embed(title=f"🔥 Set {target.name}'s level to {int(level)}", color=0x2ecc71)
@@ -6283,14 +6283,17 @@ async def on_message(message: discord.Message):
     # =================================================================
     # 🔢 數數頻道（獨立處理，命中這個頻道就不繼續往下跑 67 統計/等級/Streaks，直接 return）
     # =================================================================
-    if is_feature_enabled(gid, "counting"):
+        if is_feature_enabled(gid, "counting"):
         cursor.execute("SELECT channel_id FROM counting_settings WHERE guild_id = ?", (gid,))
         c_row = cursor.fetchone()
         if c_row and c_row[0] and str(c_row[0]) == str(message.channel.id):
-        content = message.content.strip()
-                is_admin = message.author.guild_permissions.administrator if isinstance(message.author, discord.Member) else False
+            content = message.content.strip()
+            is_admin = (
+                message.author.guild_permissions.administrator
+                if isinstance(message.author, discord.Member)
+                else False
+            )
 
-            # 允許整數（含負數）："12"、"-3"；不接受 "+1"、小數、其他文字
             def _parse_count_int(s: str):
                 if not s:
                     return None
@@ -6302,39 +6305,40 @@ async def on_message(message: discord.Message):
 
             number = _parse_count_int(content)
             if number is None:
-                # 🎯 非數字：管理員可以正常發，其他人一律刪除、不影響計數
                 if not is_admin:
                     try:
                         await message.delete()
                     except discord.Forbidden:
-                        logger.error(f"[Counting] 沒有權限刪除 {message.author} 在 {message.guild.name} 的非數字訊息")
+                        logger.error(
+                            f"[Counting] 沒有權限刪除 {message.author} 在 {message.guild.name} 的非數字訊息"
+                        )
                     except discord.NotFound:
                         pass
                 conn.close()
                 return
 
-            # 🎯 用鎖把「讀取現況 -> 判斷 -> 寫回資料庫」整段包起來，強制同一伺服器一次只處理一則，
-            # 避免使用者打字太快、兩則訊息同時處理時互相讀到還沒更新的舊資料
             async with get_counting_lock(message.guild.id):
-                # 進鎖之後才重新查一次最新狀態（不能沿用進鎖前查到的舊資料）
-                cursor.execute("SELECT current_count, last_user_id, mute_duration FROM counting_settings WHERE guild_id = ?", (gid,))
+                cursor.execute(
+                    "SELECT current_count, last_user_id, mute_duration FROM counting_settings WHERE guild_id = ?",
+                    (gid,),
+                )
                 s_row = cursor.fetchone()
                 current_count, last_user_id, mute_dur = s_row if s_row else (0, None, "10m")
 
-                # number 已在鎖外解析；進鎖後用最新 current_count 算期望值
                 if current_count == 0:
-                    # 從 0 出發：1 或 -1 都對，決定之後往正或往負
                     valid = number in (1, -1)
                     expected_hint = "1 or -1"
                 elif current_count > 0:
                     valid = number == current_count + 1
                     expected_hint = str(current_count + 1)
                 else:
-                    # current_count < 0
                     valid = number == current_count - 1
                     expected_hint = str(current_count - 1)
 
-                same_user = last_user_id is not None and str(message.author.id) == str(last_user_id)
+                same_user = (
+                    last_user_id is not None
+                    and str(message.author.id) == str(last_user_id)
+                )
 
                 if valid and not same_user:
                     cursor.execute(
@@ -6379,8 +6383,6 @@ async def on_message(message: discord.Message):
                             f"💥 {message.author.mention} broke the count at **{number}** ({reason})! "
                             f"Count reset to **0**. Next: **1** or **-1**."
                         )
-                    except Exception as e:
-                        logger.error(f"[Counting 重置訊息發送失敗]: {e}")
                     except Exception as e:
                         logger.error(f"[Counting 重置訊息發送失敗]: {e}")
 
