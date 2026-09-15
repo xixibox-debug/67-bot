@@ -371,8 +371,6 @@ async def execute_agent_tool(tool_name: str, args: dict, invoker: discord.Member
         warn_msg = (args.get("warn_message") or "").strip()
         if not warn_msg:
             return None, "❌ No warning message provided."
-
-        # 頻道公開訊息（管理員看的，暫時維持 embed）
         embed = discord.Embed(
             title="⚠️ Warn",
             color=0xff8500,
@@ -382,8 +380,6 @@ async def execute_agent_tool(tool_name: str, args: dict, invoker: discord.Member
             ),
         )
         embed.set_footer(text=f"{guild.name}｜67")
-
-        # 使用者私訊（Container）
         dm_id = None
         try:
             dm_msg = await target.send(
@@ -392,14 +388,11 @@ async def execute_agent_tool(tool_name: str, args: dict, invoker: discord.Member
             dm_id = str(dm_msg.id)
         except discord.Forbidden:
             pass
-
-        # Dashboard off 或警告自己 → 不寫 DB
         cfg = ensure_warn_settings(guild)
         if cfg["dashboard_enabled"] and target.id != invoker.id:
             insert_warn(
                 guild.id, target.id, invoker.id, warn_msg, dm_message_id=dm_id
             )
-
         return embed, None
 
     elif tool_name == "add_role":
