@@ -3355,6 +3355,7 @@ class WarnHistoryView(ui.LayoutView):
                 ui.Separator(),  # 細（按鈕列前）
                 ui.ActionRow(search_r, search_w),
                 # 不要 accent_color
+            )
         )
         self.add_item(ui.ActionRow(back_btn))
 
